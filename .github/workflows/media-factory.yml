@@ -2,6 +2,8 @@ name: MediaForge Production Factory
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
 
 permissions:
   contents: read
@@ -11,14 +13,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  probe:
+    name: Check pending factory work
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_work: ${{ steps.queue.outputs.has_work }}
+    steps:
+      - name: Probe Supabase queue
+        id: queue
+        env:
+          SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_SECRET_KEY"
+          RESPONSE="$(curl --fail --silent --show-error --get \
+            "$SUPABASE_URL/rest/v1/youtube_factory_jobs" \
+            -H "apikey: $SUPABASE_SECRET_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SECRET_KEY" \
+            --data-urlencode 'select=id' \
+            --data-urlencode 'status=eq.pending' \
+            --data-urlencode 'preferred_backend=eq.github' \
+            --data-urlencode 'stage=in.(mediaforge,production,render)' \
+            --data-urlencode 'limit=1')"
+          if [ "$RESPONSE" = '[]' ]; then
+            echo 'has_work=false' >> "$GITHUB_OUTPUT"
+            echo 'No pending GitHub MediaForge jobs.'
+          else
+            echo 'has_work=true' >> "$GITHUB_OUTPUT"
+            echo 'Pending MediaForge work detected.'
+          fi
+
   factory:
+    needs: probe
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.probe.outputs.has_work == 'true' }}
     name: ${{ matrix.lane }} / production
     runs-on: ubuntu-latest
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      # Two simultaneous lanes keeps PT/EN throughput while avoiding four large
-      # concurrent transfers from the Dell media gateway.
       max-parallel: 2
       matrix:
         include:
