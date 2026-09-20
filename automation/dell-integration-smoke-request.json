@@ -1,5 +1,5 @@
 {
-  "reason": "capture_gateway_catalog_schema_before_refresh",
+  "reason": "validate_clean_gateway_catalog_zero_stale_assets",
   "publish": false,
-  "requested_at": "2026-09-20T22:52:00Z"
+  "requested_at": "2026-09-20T22:56:00Z"
 }
