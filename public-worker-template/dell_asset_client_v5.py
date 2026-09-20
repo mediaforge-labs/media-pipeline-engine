@@ -3,19 +3,12 @@ from __future__ import annotations
 
 """Harden Dell asset authorization without changing semantic selection logic.
 
-The legacy client authorized the entire curated catalog in one gateway request. The Dell
-gateway caps a request at 200 assets and can also return HTTP 403 for assets inside a large
-allowlist. V5 downloads every selected asset through its own short-lived, single-asset
-authorization instead.
-
-Because the legacy main() still creates one catalog-wide request before it starts downloading,
-we explicitly bypass only that obsolete oversized request here. Status/catalog/delete calls and
-all real single-asset create_request calls continue to hit the Dell control endpoint normally.
-
-The legacy fallback loop also had a bookkeeping bug when more than one stale catalog asset was
-encountered for the same narration segment: the first failed replacement changed the segment map,
-but a second replacement still tried to update the original asset id. V5 patches that call so the
-map advances from the currently failed candidate to the next candidate on every hop.
+V5 keeps semantic selection from the proven legacy client while hardening transport:
+- one short-lived authorization per selected asset;
+- oversized legacy catalog authorization is bypassed;
+- stale->stale->valid replacement chains keep their semantic mapping correct;
+- a live /health response is authoritative, so an old stored heartbeat cannot block a
+  healthy persistent Dell gateway.
 """
 
 import importlib.util
@@ -48,12 +41,33 @@ def _patch_legacy_multihop_mapping() -> None:
 
 
 _patch_legacy_multihop_mapping()
-
-# Keep a direct reference before overriding legacy.control. The legacy main() creates a
-# catalog-wide authorization request even though V5 never uses it: download_asset() below
-# creates a fresh authorization for each individual asset. Dell rejects >200 asset_ids, so
-# bypass exactly that redundant legacy request while preserving all real control traffic.
 _original_control = legacy.control
+
+
+def _confirm_live_gateway(status: dict) -> dict:
+    public_url = str(status.get("public_url") or "").rstrip("/")
+    if not public_url:
+        return status
+    try:
+        response = legacy.requests.get(
+            f"{public_url}/health",
+            headers={"User-Agent": "MediaForge-GitHub/5.3-live-health"},
+            timeout=12,
+        )
+        if response.status_code != 200:
+            return status
+        health = response.json()
+        if not health.get("ok") or str(health.get("gateway_id") or "") != "dell-main":
+            return status
+        live = dict(status)
+        live["status"] = "online"
+        live["heartbeat_at"] = datetime.now(timezone.utc).isoformat()
+        live["gateway_live_health"] = True
+        live["gateway_version"] = health.get("version") or live.get("gateway_version")
+        live["catalog_assets"] = health.get("catalog_assets") or live.get("catalog_assets")
+        return live
+    except Exception:
+        return status
 
 
 def _control_v5(action: str, body: dict | None = None):
@@ -73,7 +87,10 @@ def _control_v5(action: str, body: dict | None = None):
                 "request_id": str(body.get("request_id") or ""),
                 "asset_count": len(asset_ids),
             }
-    return _original_control(action, body)
+    result = _original_control(action, body)
+    if action == "status" and isinstance(result, dict):
+        return _confirm_live_gateway(result)
+    return result
 
 
 legacy.control = _control_v5
@@ -133,7 +150,7 @@ def download_asset(status: dict, ignored_request_id: str, ignored_token: str, it
                 url,
                 headers={
                     "X-MediaForge-Request-Token": token,
-                    "User-Agent": "MediaForge-GitHub/5.2-multihop-fallback-fix",
+                    "User-Agent": "MediaForge-GitHub/5.3-live-health",
                 },
             )
             with urllib.request.urlopen(request, timeout=1800) as source, part.open("wb") as target:
@@ -158,7 +175,6 @@ def download_asset(status: dict, ignored_request_id: str, ignored_token: str, it
             if exc.code in {404, 410}:
                 return False, last_error, current_status
             if exc.code == 403:
-                # Authorization failure: recreate a fresh single-asset allowlist.
                 if auth_attempt >= 3:
                     raise SystemExit(
                         f"Dell gateway authorization failed three times for asset {asset_id} (HTTP 403). "
@@ -188,7 +204,5 @@ def download_asset(status: dict, ignored_request_id: str, ignored_token: str, it
     return False, last_error, current_status
 
 
-# Override only the transport/auth layer; selection, uniqueness, semantic mapping,
-# byte-budget checks and final manifest generation stay in the proven legacy client.
 legacy.download_asset = download_asset
 legacy.main()
