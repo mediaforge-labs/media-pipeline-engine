@@ -38,7 +38,7 @@ def control(action: str, body: dict | None = None):
     base = os.environ['SUPABASE_URL'].rstrip('/')
     key = os.environ['SUPABASE_SECRET_KEY']
     url = f'{base}/functions/v1/mediaforge-dell-control'
-    headers = {'apikey': key, 'Content-Type': 'application/json', 'User-Agent': 'MediaForge-GitHub/4.1'}
+    headers = {'apikey': key, 'Content-Type': 'application/json', 'User-Agent': 'MediaForge-GitHub/4.2'}
     if body is None:
         response = requests.get(url, headers=headers, params={'action': action}, timeout=60)
     else:
@@ -77,9 +77,7 @@ def score(asset: dict, query: str) -> float:
     for terms in CONCEPTS:
         if any(term in ql for term in terms) and any(term in hay for term in terms):
             value += 9.0
-    # deterministic tie-breaker, never random between runs
     value += int(hashlib.sha256((query + str(asset['asset_id'])).encode()).hexdigest()[:4], 16) / 65535
-    # Prefer already-cut, lighter clips when semantic scores are close.
     size_mb = asset_size(asset) / 1024 / 1024
     value -= min(size_mb, 250.0) * 0.004
     return value
@@ -93,7 +91,6 @@ def split_sentences(text: str) -> list[str]:
 
 
 def segment_script(text: str, target_words: int = 12, max_words: int = 18) -> list[str]:
-    """Build scene-sized semantic queries from what is being narrated."""
     units: list[str] = []
     for sentence in split_sentences(text):
         words = sentence.split()
@@ -133,8 +130,6 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
     if not segments:
         raise SystemExit('Narration could not be segmented for semantic media selection')
 
-    # Approximately one unique source video per visual scene. The renderer must never
-    # need to recycle a source file just because the prefetch pool was too small.
     words = max(1, len(script.split()))
     estimated_scene_count = max(len(segments), math.ceil(words / 12))
     required_unique = min(len(assets), estimated_scene_count)
@@ -144,9 +139,6 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
             f'but --max-assets={max_assets}. Increase the pool before TTS/render.'
         )
 
-    # Prove up front that the requested number of distinct files can fit even in the
-    # best possible packing. This is cheap and avoids beginning downloads/TTS in an
-    # impossible configuration.
     smallest_required = sorted(asset_size(item) for item in assets)[:required_unique]
     minimum_possible_bytes = sum(smallest_required)
     if len(smallest_required) < required_unique or minimum_possible_bytes > byte_budget:
@@ -166,13 +158,6 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
         return [item for item in assets if str(item.get('asset_id')) not in used]
 
     def candidates_that_preserve_capacity(remaining_slots_after_pick: int) -> list[dict]:
-        """Return candidates that still leave room for all required unique clips.
-
-        The previous implementation greedily picked the most semantically relevant clip
-        that fit *right now*. Near the end of an 8 GiB budget that could strand the
-        selector a few clips short. This version reserves enough bytes for the smallest
-        remaining distinct clips before accepting each semantic pick.
-        """
         pool = unused_assets()
         if remaining_slots_after_pick <= 0:
             return [item for item in pool if total_bytes + asset_size(item) <= byte_budget]
@@ -197,17 +182,14 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
                 feasible.append(item)
         return feasible
 
-    # First pass: one different source file for every required narration-sized scene.
-    # Semantic relevance remains the primary rank, but a pick is rejected if it would
-    # make it mathematically impossible to fit the remaining unique clips in the runner.
-    for segment_index, segment in enumerate(segments[:required_unique]):
-        remaining_required_after_pick = required_unique - len(chosen) - 1
+    # Map every real narration segment to one distinct GTA VI clip first.
+    for segment_index, segment in enumerate(segments):
+        remaining_required_after_pick = max(0, required_unique - len(chosen) - 1)
         candidates = candidates_that_preserve_capacity(remaining_required_after_pick)
         if not candidates:
             break
         query = title + '\n' + segment
-        ranked = sorted(candidates, key=lambda item: score(item, query), reverse=True)
-        item = ranked[0]
+        item = max(candidates, key=lambda candidate: score(candidate, query))
         aid = str(item['asset_id'])
         used.add(aid)
         total_bytes += asset_size(item)
@@ -220,19 +202,43 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
         enriched['mediaforge_max_uses'] = 1
         enriched['mediaforge_gta_vi_only'] = True
         chosen.append(enriched)
-        selection_rows.append({'segment_index': segment_index, 'asset_id': aid, 'segment': segment})
+        selection_rows.append({'segment_index': segment_index, 'asset_id': aid, 'segment': segment, 'role': 'semantic-scene'})
+
+    # IMPORTANT: required_unique can be slightly larger than len(segments) because the
+    # duration-based safety estimate is conservative. The previous v4.1 selector aborted
+    # here at 109/112 before it had a chance to add the three reserve clips. Complete the
+    # mandatory unique set now, still preserving byte capacity and never reusing a source.
+    whole_query = title + '\n' + script
+    while len(chosen) < required_unique:
+        remaining_required_after_pick = required_unique - len(chosen) - 1
+        candidates = candidates_that_preserve_capacity(remaining_required_after_pick)
+        if not candidates:
+            break
+        # For reserve clips, prefer relevance but give size a stronger tie-break so the
+        # safety reserve does not consume unnecessary runner disk.
+        def reserve_rank(item: dict):
+            return (score(item, whole_query), -asset_size(item))
+        item = max(candidates, key=reserve_rank)
+        aid = str(item['asset_id'])
+        used.add(aid)
+        total_bytes += asset_size(item)
+        enriched = dict(item)
+        enriched['mediaforge_max_uses'] = 1
+        enriched['mediaforge_gta_vi_only'] = True
+        enriched['mediaforge_reserve_asset'] = True
+        chosen.append(enriched)
+        selection_rows.append({'segment_index': None, 'asset_id': aid, 'segment': None, 'role': 'unique-reserve'})
 
     if len(chosen) < required_unique:
         raise SystemExit(
             f'Media preflight selected only {len(chosen)} unique clips although {required_unique} are required. '
-            f'The capacity-reserving selector refused to reuse media or exceed the runner budget.'
+            f'No reuse was allowed and the remaining candidates could not fit the runner budget.'
         )
 
-    # Fill a relevance buffer from still-unused GTA VI clips so the encrypted scene planner
-    # has alternatives if a selected clip is too short or unsuitable for a specific scene.
-    whole_query = title + '\n' + script
+    # Optional buffer for scene-planner alternatives. This buffer is best-effort; the
+    # mandatory no-reuse capacity above has already been proven and selected.
     remaining = unused_assets()
-    remaining.sort(key=lambda item: score(item, whole_query), reverse=True)
+    remaining.sort(key=lambda item: (score(item, whole_query), -asset_size(item)), reverse=True)
     for item in remaining:
         if len(chosen) >= target_pool:
             break
@@ -245,6 +251,7 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
         enriched = dict(item)
         enriched['mediaforge_max_uses'] = 1
         enriched['mediaforge_gta_vi_only'] = True
+        enriched['mediaforge_buffer_asset'] = True
         chosen.append(enriched)
 
     if len({str(item['asset_id']) for item in chosen}) != len(chosen):
@@ -273,8 +280,6 @@ def main():
     if datetime.now(timezone.utc) - beat > timedelta(minutes=2):
         raise SystemExit('Dell asset gateway heartbeat is stale')
 
-    # This gateway is the owner-curated GTA VI media universe. No external/random media
-    # is allowed into the render pool.
     assets = [item for item in catalog.get('assets', []) if item.get('approved', True)]
     chosen, selection_rows, segments, required_unique, selected_bytes = choose_unique_pool(
         args.title, script, assets, args.max_assets, args.max_total_bytes
@@ -305,7 +310,7 @@ def main():
             url = f"{status['public_url'].rstrip('/')}/asset/{request_id}/{item['asset_id']}"
             request = urllib.request.Request(
                 url,
-                headers={'X-MediaForge-Request-Token': token, 'User-Agent': 'MediaForge-GitHub/4.1'},
+                headers={'X-MediaForge-Request-Token': token, 'User-Agent': 'MediaForge-GitHub/4.2'},
             )
             with urllib.request.urlopen(request, timeout=1800) as source, out.open('wb') as target:
                 while True:
@@ -319,15 +324,7 @@ def main():
             print(json.dumps({'downloaded': index, 'of': len(chosen), 'asset_id': item['asset_id'], 'bytes': out.stat().st_size}))
 
         (dest / 'Catalogo geral.json').write_text(
-            json.dumps(
-                {
-                    'scope': 'gta-vi-owner-curated-only',
-                    'reuse_policy': 'never-reuse-source-file',
-                    'assets': local,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps({'scope': 'gta-vi-owner-curated-only','reuse_policy': 'never-reuse-source-file','assets': local}, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
         (dest / 'mediaforge-selection.json').write_text(
@@ -352,22 +349,7 @@ def main():
         except Exception:
             pass
 
-    print(
-        json.dumps(
-            {
-                'status': 'ready',
-                'root': str(dest.resolve()),
-                'selected': len(chosen),
-                'required_unique': required_unique,
-                'segments': len(segments),
-                'selected_gb': round(selected_bytes / 1024 / 1024 / 1024, 3),
-                'reuse_allowed': False,
-                'scope': 'gta-vi-owner-curated-only',
-                'request_id': request_id,
-            },
-            ensure_ascii=False,
-        )
-    )
+    print(json.dumps({'status':'ready','root':str(dest.resolve()),'selected':len(chosen),'required_unique':required_unique,'segments':len(segments),'selected_gb':round(selected_bytes/1024/1024/1024,3),'reuse_allowed':False,'scope':'gta-vi-owner-curated-only','request_id':request_id}, ensure_ascii=False))
 
 
 if __name__ == '__main__':
