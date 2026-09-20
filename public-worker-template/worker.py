@@ -52,6 +52,48 @@ def safe_extract_tar_gz(payload: bytes, destination: pathlib.Path) -> None:
         archive.extractall(destination)
 
 
+def enable_subprocess_stderr_diagnostics(core_dir: pathlib.Path, env: dict[str, str]) -> None:
+    """Expose stderr captured by subprocess.run inside the encrypted core.
+
+    The private core intentionally captures tool stderr. During a canary failure
+    that can hide the actual ffmpeg diagnostic and leave only CalledProcessError.
+    When MEDIAFORGE_DEBUG_SUBPROCESS_STDERR is enabled, inject a sitecustomize
+    module into the child interpreter that prints captured stderr before
+    re-raising the original exception. Runtime behavior is otherwise unchanged.
+    """
+    enabled = os.environ.get("MEDIAFORGE_DEBUG_SUBPROCESS_STDERR", "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return
+
+    debug_dir = core_dir / ".mediaforge-debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    (debug_dir / "sitecustomize.py").write_text(
+        """import subprocess\n"
+        "import sys\n\n"
+        "_mediaforge_original_run = subprocess.run\n\n"
+        "def _mediaforge_run_with_stderr(*args, **kwargs):\n"
+        "    try:\n"
+        "        return _mediaforge_original_run(*args, **kwargs)\n"
+        "    except subprocess.CalledProcessError as exc:\n"
+        "        captured = getattr(exc, 'stderr', None)\n"
+        "        if captured:\n"
+        "            if isinstance(captured, bytes):\n"
+        "                captured = captured.decode('utf-8', errors='replace')\n"
+        "            sys.stderr.write('\\n--- MediaForge captured subprocess stderr ---\\n')\n"
+        "            sys.stderr.write(str(captured))\n"
+        "            if not str(captured).endswith('\\n'):\n"
+        "                sys.stderr.write('\\n')\n"
+        "            sys.stderr.write('--- End MediaForge captured subprocess stderr ---\\n')\n"
+        "        raise\n\n"
+        "subprocess.run = _mediaforge_run_with_stderr\n"
+        """,
+        encoding="utf-8",
+    )
+
+    previous = env.get("PYTHONPATH", "").strip()
+    env["PYTHONPATH"] = str(debug_dir) + (os.pathsep + previous if previous else "")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", required=True, type=pathlib.Path)
@@ -87,6 +129,7 @@ def main() -> None:
             "MEDIAFORGE_OUTPUT_DIR": str(output_dir),
             "MEDIAFORGE_JOB_PATH": str(job),
         })
+        enable_subprocess_stderr_diagnostics(core_dir, env)
         subprocess.run(["python", str(entrypoint)], check=True, cwd=core_dir, env=env)
 
 
