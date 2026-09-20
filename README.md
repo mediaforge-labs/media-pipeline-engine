@@ -15,6 +15,7 @@ jobs/
   README.md
   smoke-batch.json
   production-test.json
+  voice-calibration.json
 
 public-worker-template/
   worker.py
@@ -38,13 +39,28 @@ SECURITY.md
 
 1. Proprietary core source stays outside this public repository.
 2. `private-worker-packaging/build_core_bundle.py` creates an AES-256-GCM encrypted runtime bundle.
-3. The workflow loads that encrypted bundle from `MEDIAFORGE_CORE_BUNDLE_B64` or, for the smoke workflow, from an optional repository path.
-4. `public-worker-template/worker.py` decrypts the core only into an ephemeral temporary directory.
-5. The worker passes its lane, locale, output directory, and job manifest to the private `run.py` entrypoint.
-6. The runtime produces planning data, four logical TTS shards, captions, one horizontal long-form render, and at least five vertical Shorts.
-7. Production mode can use Chatterbox Multilingual V3 voice cloning and approved real media assets.
-8. The public finalizer encrypts the complete lane output before GitHub artifact upload.
-9. Encrypted workflow artifacts are retained for two days.
+3. The workflow loads that encrypted bundle from `MEDIAFORGE_CORE_BUNDLE_B64`.
+4. The canonical human voice reference is stored separately in `MEDIAFORGE_VOICE_REFERENCE_B64` so neither secret exceeds GitHub's size limit.
+5. `public-worker-template/worker.py` decrypts the core only into an ephemeral temporary directory.
+6. The worker passes its lane, locale, output directory, voice-reference path, and job manifest to the private `run.py` entrypoint.
+7. The runtime produces planning data, four logical TTS shards, captions, one horizontal long-form render, and at least five vertical Shorts.
+8. Production mode uses Chatterbox Multilingual V3 voice cloning and approved real media assets.
+9. The public finalizer encrypts the complete lane output before GitHub artifact upload.
+
+## Human voice profile v4
+
+The canonical Leonidanos human voice reference is no longer packed inside the encrypted core. It is materialized only inside the GitHub runner from `MEDIAFORGE_VOICE_REFERENCE_B64`, converted to 24 kHz mono WAV, used for Chatterbox conditioning, and discarded with the runner.
+
+Portuguese production uses the `pt-br-human-v3` pronunciation profile. TTS-only spoken forms are applied to recurring terms such as `GTA`, `gameplay`, `minigame`, `Rockstar Games`, `crossplay`, `PlayStation`, `Xbox`, `Vice City`, `Jason`, `Extended Look` and `HUD`. Captions and visible copy keep their original spelling.
+
+The natural-voice profile uses:
+
+- `temperature = 0.80`
+- `exaggeration = 0.50`
+- `cfg_weight = 0.35` for `pt-BR`
+- no artificial tempo acceleration (`tempo = 1.00`)
+- one conditioning profile reused across all chunks
+- one deterministic seed reused across chunks to reduce voice drift
 
 ## Smoke pipeline
 
@@ -55,92 +71,47 @@ SECURITY.md
 - `en-1` — `en-US`
 - `en-2` — `en-US`
 
-The smoke workflow exercises the complete orchestration path without consuming production TTS. It creates a consolidated WAV, timed SRT captions, a 16:9 MP4, five 9:16 MP4 Shorts per lane, encrypted outputs, and four parallel GitHub Actions artifacts.
+The smoke workflow exercises the complete orchestration path without consuming production TTS.
 
-## Human voice profile v3
+## Production voice calibration
 
-The production core now carries the canonical Leonidanos voice reference **inside the encrypted runtime bundle**. The reference is not a previously generated TTS file and is never committed in plaintext.
-
-Portuguese production uses a dedicated `pt-br-human-v3` pronunciation profile. The profile keeps acronyms connected and provides TTS-only spoken forms for recurring English/gaming vocabulary such as `GTA`, `gameplay`, `minigame`, `Rockstar Games`, `crossplay`, `Vice City` and related terms. Captions and visible copy keep the original spelling.
-
-The Chatterbox production profile was also moved back into a stable/natural range:
-
-- `temperature = 0.80`
-- `exaggeration = 0.50`
-- `cfg_weight = 0.35` for `pt-BR`
-- no artificial `1.10x` tempo acceleration (`tempo = 1.00`)
-- one canonical conditioning profile reused across all chunks
-- one deterministic seed reused across chunks to reduce voice drift
-
-## Production validation
-
-`Media Production Test` is intentionally single-lane while the real voice and visual stack is being validated. Its initial choices are:
-
-- `pt-1` — `pt-BR`
-- `en-1` — `en-US`
+Before another full production render, `Media Production Test` defaults to `jobs/voice-calibration.json`. The PT-BR calibration intentionally tests terms that previously caused poor pronunciation, including `GTA`, `gameplay`, `minigame`, `Rockstar Games`, `crossplay`, `PlayStation`, `Xbox`, `Vice City`, `Jason`, `Extended Look` and `HUD`.
 
 The production workflow:
 
-1. Installs the production Chatterbox dependency and FFmpeg.
-2. Restores/caches the Chatterbox model files.
-3. Materializes the encrypted proprietary core, including its canonical voice profile.
-4. Runs Chatterbox Multilingual V3 using the encrypted voice reference and pronunciation profile.
-5. Downloads only manifest-approved `official` or `licensed` media assets.
-6. Renders a 1920×1080 long-form video and at least five 1080×1920 Shorts.
-7. Validates the real TTS provider, pronunciation profile and rendered media.
-8. Encrypts the complete result before artifact upload.
-
-After PT and EN production validation pass, the same runtime can be scaled back out to parallel production lanes/shards.
+1. Installs Chatterbox and FFmpeg.
+2. Restores/caches Chatterbox model files.
+3. Materializes the encrypted production core.
+4. Materializes the canonical human voice reference from its separate secret.
+5. Converts the reference to 24 kHz mono WAV.
+6. Runs Chatterbox Multilingual V3 using the human voice profile and pronunciation rules.
+7. Renders the test output and validates the TTS profile.
+8. Encrypts the result before artifact upload.
 
 ## Required GitHub secrets
-
-Both the smoke and production workflows use only these MediaForge repository secrets:
 
 ```text
 MEDIAFORGE_CORE_KEY_B64
 MEDIAFORGE_DATA_KEY_B64
 MEDIAFORGE_CORE_BUNDLE_B64
+MEDIAFORGE_VOICE_REFERENCE_B64
 ```
 
 - `MEDIAFORGE_CORE_KEY_B64` decrypts the proprietary runtime bundle.
 - `MEDIAFORGE_DATA_KEY_B64` encrypts completed lane outputs before artifact upload.
-- `MEDIAFORGE_CORE_BUNDLE_B64` holds the base64 representation of the encrypted runtime bundle, including the encrypted canonical voice reference.
+- `MEDIAFORGE_CORE_BUNDLE_B64` holds only the encrypted private runtime code.
+- `MEDIAFORGE_VOICE_REFERENCE_B64` holds the optimized canonical human voice reference separately from the core.
 
 Never commit the secret values or print them into workflow logs.
 
-## Build the private core bundle
+## Run the production calibration
 
-From a trusted machine or trusted packaging environment:
-
-```bash
-python -m pip install -r public-worker-template/requirements.txt
-
-export MEDIAFORGE_CORE_KEY_B64='...'
-python private-worker-packaging/build_core_bundle.py \
-  /path/to/private-core \
-  private-worker-core/core.bundle.enc
-```
-
-The private core source must contain `run.py`.
-
-To keep even the encrypted binary out of the public repository, base64-encode `core.bundle.enc` and store that value in `MEDIAFORGE_CORE_BUNDLE_B64`. The workflow materializes it only inside the runner.
-
-## Run the smoke workflow
-
-1. Open **Actions → Media Pipeline**.
-2. Choose **Run workflow**.
-3. Keep `jobs/smoke-batch.json` as the job manifest.
-4. Run the workflow.
-
-## Run the production validation
-
-After `MEDIAFORGE_CORE_BUNDLE_B64` is updated to the current human-voice bundle:
-
-1. Open **Actions → Media Production Test**.
-2. Choose `pt-1` first.
-3. Keep `jobs/production-test.json` as the manifest.
-4. Run the workflow and validate its encrypted artifact.
-5. Repeat with `en-1` only after PT succeeds.
+1. Update `MEDIAFORGE_CORE_BUNDLE_B64` with the current v4 core.
+2. Create/update `MEDIAFORGE_VOICE_REFERENCE_B64` with the current v4 voice reference.
+3. Open **Actions → Media Production Test**.
+4. Choose `pt-1`.
+5. Keep `jobs/voice-calibration.json` as the manifest.
+6. Run the workflow and listen to the resulting narration before approving any full production render.
 
 ## Security boundary
 
