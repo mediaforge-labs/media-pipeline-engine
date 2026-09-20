@@ -4,6 +4,11 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '*/15 * * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - automation/media-factory-request.json
 
 permissions:
   contents: read
