@@ -9,7 +9,7 @@ if($CatalogOnly){& $py.Source (Join-Path $Repo 'tools\dell_asset_gateway.py') --
 Remove-Item $urlfile,$log -ErrorAction SilentlyContinue
 $gateway=Start-Process $py.Source -ArgumentList (Join-Path $Repo 'tools\dell_asset_gateway.py'),'--root',$Root,'--endpoint-file',$urlfile -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 2
-$tunnel=Start-Process $cloudflared -ArgumentList 'tunnel','--url','http://127.0.0.1:8765','--no-autoupdate' -RedirectStandardError $log -RedirectStandardOutput $log -PassThru -WindowStyle Hidden
+$tunnel=Start-Process $cloudflared -ArgumentList 'tunnel','--url','http://127.0.0.1:8765','--no-autoupdate' -RedirectStandardError $log -PassThru -WindowStyle Hidden
 $url=$null
 for($i=0;$i -lt 60;$i++){Start-Sleep -Seconds 1;if(Test-Path $log){$m=Select-String -Path $log -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -AllMatches | Select-Object -Last 1;if($m){$url=$m.Matches[0].Value;break}}}
 if(!$url){Stop-Process -Id $gateway.Id -Force -ErrorAction SilentlyContinue;Stop-Process -Id $tunnel.Id -Force -ErrorAction SilentlyContinue;throw 'Nao foi possivel obter URL do Cloudflare Tunnel.'}
