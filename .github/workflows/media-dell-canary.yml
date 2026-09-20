@@ -33,6 +33,15 @@ jobs:
             public-worker-template/requirements.txt
             public-worker-template/requirements-production.txt
 
+      - name: Preflight public pipeline syntax
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            public-worker-template/build_canary_job.py \
+            public-worker-template/dell_asset_client.py \
+            public-worker-template/worker.py \
+            public-worker-template/validate_render.py
+
       - name: Cache Chatterbox models
         uses: actions/cache@v4
         with:
@@ -101,7 +110,7 @@ jobs:
             --output .runtime/dell-canary-job.json \
             --script-out .runtime/dell-canary-script.txt
 
-      - name: Fetch only selected Dell assets
+      - name: Select and fetch unique GTA VI assets
         env:
           SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
@@ -113,14 +122,37 @@ jobs:
             --title "$TITLE" \
             --script-file .runtime/dell-canary-script.txt \
             --dest .runtime/dell-assets \
-            --max-assets 18 \
+            --max-assets 140 \
+            --max-total-bytes 8589934592 \
             --job-key "dell-canary-${GITHUB_RUN_ID}"
           echo "MEDIAFORGE_VIDEO_LIBRARY_ROOT=$(realpath .runtime/dell-assets)" >> "$GITHUB_ENV"
+
+      - name: Validate media pool before expensive TTS
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib
+          p=pathlib.Path('.runtime/dell-assets/mediaforge-selection.json')
+          data=json.loads(p.read_text(encoding='utf-8'))
+          selected=int(data.get('selected_unique_assets') or 0)
+          required=int(data.get('required_unique_assets') or 0)
+          ids=[str(x.get('asset_id')) for x in data.get('segment_asset_map',[]) if x.get('asset_id')]
+          if data.get('reuse_allowed') is not False:
+              raise SystemExit('media pool does not forbid reuse')
+          if selected < required or required < 1:
+              raise SystemExit(f'insufficient unique media: selected={selected}, required={required}')
+          if len(ids) != len(set(ids)):
+              raise SystemExit('duplicate assets detected in semantic media map')
+          print(json.dumps({'status':'media_preflight_ok','selected_unique':selected,'required_unique':required,'mapped_segments':len(ids),'scope':data.get('scope')},ensure_ascii=False))
+          PY
 
       - name: Render long-form and Shorts
         env:
           MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
           MEDIAFORGE_TTS_PROVIDER: chatterbox
+          MEDIAFORGE_TTS_MAX_WORKERS: '1'
+          MEDIAFORGE_TTS_STRICT_CHUNK_ORDER: '1'
+          MEDIAFORGE_STRICT_UNIQUE_MEDIA: '1'
           MEDIAFORGE_DEBUG_SUBPROCESS_STDERR: '1'
           SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
@@ -153,23 +185,13 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Validate complete canary
+      - name: Validate complete canary and forbid reused source video
         run: |
-          python - <<'PY'
-          import json, pathlib
-          root=pathlib.Path('out/dell-canary')
-          m=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-          metrics=m.get('metrics') or {}
-          shorts=list((root/'shorts').glob('short-*.mp4'))
-          longform=root/'video'/'long-form.mp4'
-          if not longform.is_file() or longform.stat().st_size < 100000:
-              raise SystemExit('long-form missing or too small')
-          if len(shorts) < 5:
-              raise SystemExit(f'expected >=5 Shorts, got {len(shorts)}')
-          if int(metrics.get('video_assets') or 0) < 1:
-              raise SystemExit('no video assets used')
-          print(json.dumps({'long_form_bytes':longform.stat().st_size,'shorts':len(shorts),'video_assets':metrics.get('video_assets'),'music_tracks':metrics.get('music_tracks'),'narration_seconds':metrics.get('narration_seconds')},ensure_ascii=False))
-          PY
+          set -euo pipefail
+          python public-worker-template/validate_render.py \
+            --root out/dell-canary \
+            --selection .runtime/dell-assets/mediaforge-selection.json \
+            --require-five-shorts
 
       - name: Upload complete canary artifact
         uses: actions/upload-artifact@v4
@@ -183,6 +205,7 @@ jobs:
             out/dell-canary/captions/long-form.srt
             out/dell-canary/media/manifest.json
             out/dell-canary/manifest.json
+            .runtime/dell-assets/mediaforge-selection.json
           compression-level: 0
           retention-days: 2
           if-no-files-found: error
