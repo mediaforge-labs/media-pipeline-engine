@@ -81,18 +81,28 @@ jobs:
 
       - name: Download official Leonidanos voice reference
         env:
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
-          test -n "$SUPABASE_SERVICE_ROLE_KEY" || {
-            echo "SUPABASE_SERVICE_ROLE_KEY is not configured"
+          mkdir -p .runtime
+
+          if [ -n "$SUPABASE_SECRET_KEY" ]; then
+            curl --fail --silent --show-error --location \
+              -H "apikey: $SUPABASE_SECRET_KEY" \
+              "$SUPABASE_URL/storage/v1/object/authenticated/youtube-assets/$VOICE_REFERENCE_OBJECT" \
+              -o .runtime/voice-source.mp3
+          elif [ -n "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            curl --fail --silent --show-error --location \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+              "$SUPABASE_URL/storage/v1/object/authenticated/youtube-assets/$VOICE_REFERENCE_OBJECT" \
+              -o .runtime/voice-source.mp3
+          else
+            echo "Configure SUPABASE_SECRET_KEY (preferred) or SUPABASE_SERVICE_ROLE_KEY."
             exit 1
-          }
-          curl --fail --silent --show-error --location \
-            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-            "$SUPABASE_URL/storage/v1/object/authenticated/youtube-assets/$VOICE_REFERENCE_OBJECT" \
-            -o .runtime/voice-source.mp3
+          fi
+
           test -s .runtime/voice-source.mp3
           ffmpeg -y -ss 0 -t 10 -i .runtime/voice-source.mp3 \
             -vn -ac 1 -ar 24000 -c:a pcm_s16le .runtime/voice-reference.wav
