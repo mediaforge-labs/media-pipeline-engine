@@ -3,17 +3,23 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$env:SUPABASE_URL = 'https://rhddgfvtrkmusbvphnlg.supabase.co'
 
-if ([string]::IsNullOrWhiteSpace($env:SUPABASE_SECRET_KEY)) {
-  $secure = Read-Host 'Cole a SUPABASE_SECRET_KEY do MediaForge (ela nao sera exibida)' -AsSecureString
+function Read-SecretText([string]$Prompt) {
+  $secure = Read-Host $Prompt -AsSecureString
   $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
   try {
-    $env:SUPABASE_SECRET_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+    return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
   }
   finally {
     [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
   }
+}
+
+if ([string]::IsNullOrWhiteSpace($env:SUPABASE_S3_ACCESS_KEY_ID)) {
+  $env:SUPABASE_S3_ACCESS_KEY_ID = Read-SecretText 'Cole o S3 Access Key ID do Supabase (nao sera exibido)'
+}
+if ([string]::IsNullOrWhiteSpace($env:SUPABASE_S3_SECRET_ACCESS_KEY)) {
+  $env:SUPABASE_S3_SECRET_ACCESS_KEY = Read-SecretText 'Cole o S3 Secret Access Key do Supabase (nao sera exibido)'
 }
 
 if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
@@ -29,12 +35,14 @@ if (-not $ffprobe) {
   Write-Warning 'ffprobe nao foi encontrado. O upload funciona, mas algumas duracoes ficarao vazias no catalogo.'
 }
 
-Write-Host 'Instalando dependencia leve para o upload...'
-& $python.Source -m pip install --disable-pip-version-check requests==2.32.5
+Write-Host 'Instalando dependencias do sincronizador S3...'
+& $python.Source -m pip install --disable-pip-version-check boto3==1.40.45
+if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar boto3.' }
 
-Write-Host "Sincronizando biblioteca aprovada em $Root ..."
+Write-Host "Sincronizando biblioteca aprovada em $Root via Supabase S3..."
 & $python.Source tools\sync_video_library.py --root $Root
 if ($LASTEXITCODE -ne 0) { throw "Sincronizacao falhou com codigo $LASTEXITCODE" }
 
 Write-Host 'Sincronizacao concluida. O Dell nao e necessario para os renders.'
-Remove-Item Env:SUPABASE_SECRET_KEY -ErrorAction SilentlyContinue
+Remove-Item Env:SUPABASE_S3_ACCESS_KEY_ID -ErrorAction SilentlyContinue
+Remove-Item Env:SUPABASE_S3_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue
