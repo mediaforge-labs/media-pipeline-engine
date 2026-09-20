@@ -38,7 +38,7 @@ The Dell workstation is not a production compute backend. It is used only for th
 - `en-1` — `en-US`
 - `en-2` — `en-US`
 
-The workflow can be started manually and also checks for work every 15 minutes. Each lane atomically leases one pending Supabase job, so the same variant cannot be processed by two runners at once.
+The workflow is intentionally **manual during canary validation**. After PT-BR voice approval and one successful end-to-end production canary, the schedule is enabled for continuous queue polling. Each lane atomically leases one pending Supabase job, so the same variant cannot be processed by two runners at once.
 
 `public-worker-template/factory_worker.py`:
 
@@ -79,7 +79,7 @@ Visible copy and captions retain normal spelling. The pronunciation layer handle
 
 All video files curated by the project owner under `C:\LeonidanosVideoPipeline` are treated as approved assets for this factory.
 
-`tools/sync_video_library.py` performs a **one-time upload only**; it does not render on the Dell. It scans videos plus the three editorial indexes:
+`tools/sync_video_library.ps1` is the one-command helper and calls `tools/sync_video_library.py`. The process is a **one-time upload only**; it does not render on the Dell. It scans videos plus the three editorial indexes:
 
 - `Repositorio GTA`
 - `Catálogo geral`
