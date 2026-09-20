@@ -97,7 +97,7 @@ jobs:
           test -n "$SUPABASE_S3_ACCESS_KEY_ID" || { echo "SUPABASE_S3_ACCESS_KEY_ID is not configured"; exit 1; }
           test -n "$SUPABASE_S3_SECRET_ACCESS_KEY" || { echo "SUPABASE_S3_SECRET_ACCESS_KEY is not configured"; exit 1; }
           python tools/s3_probe.py
-          python public-worker-template/factory_worker.py \
+          python public-worker-template/factory_worker_v2.py \
             --lane "${{ matrix.lane }}" \
             --locale "${{ matrix.locale }}" \
             --bundle "$MEDIAFORGE_BUNDLE_PATH" \
