@@ -1,7 +1,7 @@
 {
-  "requested_at": "2026-09-20T01:50:00-03:00",
+  "requested_at": "2026-09-20T02:00:00-03:00",
   "lane": "pt-1",
   "manifest": "jobs/voice-calibration.json",
-  "purpose": "Validate PT-BR human voice profile before enabling full production factory",
-  "attempt": 2
+  "purpose": "Validate PT-BR human voice profile using encrypted core v7 audio-only calibration",
+  "attempt": 3
 }
