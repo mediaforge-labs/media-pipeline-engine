@@ -4,10 +4,13 @@ from __future__ import annotations
 """Harden Dell asset authorization without changing semantic selection logic.
 
 The legacy client authorized the entire curated catalog in one gateway request. The Dell
-gateway intermittently returned HTTP 403 for assets inside that oversized allowlist. This
-wrapper reuses the existing selector/main flow but replaces each asset download with a
-single-asset, short-lived authorization. 403 therefore means authorization trouble and is
-retried by recreating the request; 404/410 remain true stale/missing-asset signals.
+gateway caps a request at 200 assets and can also return HTTP 403 for assets inside a large
+allowlist. V5 downloads every selected asset through its own short-lived, single-asset
+authorization instead.
+
+Because the legacy main() still creates one catalog-wide request before it starts downloading,
+we explicitly bypass only that obsolete oversized request here. Status/catalog/delete calls and
+all real single-asset create_request calls continue to hit the Dell control endpoint normally.
 """
 
 import importlib.util
@@ -26,6 +29,35 @@ if spec is None or spec.loader is None:
     raise SystemExit("Unable to load Dell asset client")
 legacy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(legacy)
+
+# Keep a direct reference before overriding legacy.control. The legacy main() creates a
+# catalog-wide authorization request even though V5 never uses it: download_asset() below
+# creates a fresh authorization for each individual asset. Dell rejects >200 asset_ids, so
+# bypass exactly that redundant legacy request while preserving all real control traffic.
+_original_control = legacy.control
+
+
+def _control_v5(action: str, body: dict | None = None):
+    if action == "create_request" and body is not None:
+        asset_ids = list(body.get("asset_ids") or [])
+        if len(asset_ids) > 200:
+            print(
+                {
+                    "legacy_catalog_authorization_bypassed": True,
+                    "supplied": len(asset_ids),
+                    "gateway_max": 200,
+                    "reason": "v5 uses single-asset authorization",
+                }
+            )
+            return {
+                "status": "bypassed",
+                "request_id": str(body.get("request_id") or ""),
+                "asset_count": len(asset_ids),
+            }
+    return _original_control(action, body)
+
+
+legacy.control = _control_v5
 
 
 def _delete_request(request_id: str) -> None:
@@ -82,7 +114,7 @@ def download_asset(status: dict, ignored_request_id: str, ignored_token: str, it
                 url,
                 headers={
                     "X-MediaForge-Request-Token": token,
-                    "User-Agent": "MediaForge-GitHub/5.0-single-asset-auth",
+                    "User-Agent": "MediaForge-GitHub/5.1-single-asset-auth",
                 },
             )
             with urllib.request.urlopen(request, timeout=1800) as source, part.open("wb") as target:
@@ -138,6 +170,6 @@ def download_asset(status: dict, ignored_request_id: str, ignored_token: str, it
 
 
 # Override only the transport/auth layer; selection, uniqueness, semantic mapping,
-# byte-budget checks and final manifest generation stay in the proven v4 client.
+# byte-budget checks and final manifest generation stay in the proven legacy client.
 legacy.download_asset = download_asset
 legacy.main()
