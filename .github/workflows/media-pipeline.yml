@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       bundle_path:
-        description: Encrypted proprietary core bundle path
+        description: Optional encrypted core bundle path committed to the repository
         required: false
         default: private-worker-core/core.bundle.enc
       job_manifest:
@@ -51,15 +51,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Validate pipeline inputs
+      - name: Materialize encrypted core bundle
         env:
-          BUNDLE_PATH: ${{ inputs.bundle_path }}
+          REQUESTED_BUNDLE_PATH: ${{ inputs.bundle_path }}
+          CORE_BUNDLE_B64: ${{ secrets.MEDIAFORGE_CORE_BUNDLE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -f "$REQUESTED_BUNDLE_PATH" ]; then
+            BUNDLE_PATH="$(realpath "$REQUESTED_BUNDLE_PATH")"
+          elif [ -n "$CORE_BUNDLE_B64" ]; then
+            mkdir -p .runtime
+            printf '%s' "$CORE_BUNDLE_B64" | base64 --decode > .runtime/core.bundle.enc
+            BUNDLE_PATH="$(realpath .runtime/core.bundle.enc)"
+          else
+            echo "No encrypted core bundle is available."
+            echo "Commit an encrypted bundle or configure MEDIAFORGE_CORE_BUNDLE_B64."
+            exit 1
+          fi
+          test -s "$BUNDLE_PATH"
+          echo "MEDIAFORGE_BUNDLE_PATH=$BUNDLE_PATH" >> "$GITHUB_ENV"
+
+      - name: Validate job manifest
+        env:
           JOB_MANIFEST: ${{ inputs.job_manifest }}
         run: |
-          test -f "$BUNDLE_PATH" || {
-            echo "Encrypted core bundle not found: $BUNDLE_PATH"
-            exit 1
-          }
+          set -euo pipefail
           test -f "$JOB_MANIFEST" || {
             echo "Job manifest not found: $JOB_MANIFEST"
             exit 1
@@ -71,7 +87,7 @@ jobs:
           MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
         run: |
           python public-worker-template/worker.py \
-            --bundle "${{ inputs.bundle_path }}" \
+            --bundle "$MEDIAFORGE_BUNDLE_PATH" \
             --job "${{ inputs.job_manifest }}" \
             --lane "${{ matrix.lane }}" \
             --locale "${{ matrix.locale }}" \
