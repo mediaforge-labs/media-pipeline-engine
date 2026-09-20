@@ -92,18 +92,48 @@ def duration_seconds(path: pathlib.Path) -> float | None:
 def headers() -> dict[str,str]:
     key=(os.environ.get('SUPABASE_SECRET_KEY') or os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or '').strip()
     if not key: raise SystemExit('Set SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY')
-    out={'apikey':key,'User-Agent':'MediaForge-Library-Sync/1.0'}
-    if not key.startswith('sb_secret_'): out['Authorization']=f'Bearer {key}'
-    return out
+    # Storage requires Authorization. Supabase SDKs also mirror an API key into
+    # Authorization when no user session exists; keep apikey as well for gateway auth.
+    return {
+        'apikey': key,
+        'Authorization': f'Bearer {key}',
+        'User-Agent': 'MediaForge-Library-Sync/1.1',
+    }
 
 
-def upload(base: str, local: pathlib.Path, storage_path: str, content_type: str | None=None) -> None:
+def object_size(base: str, storage_path: str) -> int | None:
+    encoded=urllib.parse.quote(storage_path,safe='/')
+    url=f"{base.rstrip('/')}/storage/v1/object/authenticated/{BUCKET}/{encoded}"
+    try:
+        r=requests.head(url,headers=headers(),timeout=(15,60),allow_redirects=True)
+        if r.status_code == 404:
+            return None
+        if r.status_code >= 400:
+            return None
+        raw=r.headers.get('Content-Length')
+        return int(raw) if raw and raw.isdigit() else -1
+    except Exception:
+        return None
+
+
+def upload(base: str, local: pathlib.Path, storage_path: str, content_type: str | None=None) -> str:
+    remote_size=object_size(base,storage_path)
+    local_size=local.stat().st_size
+    if remote_size == local_size:
+        return 'skipped'
+
     url=f"{base.rstrip('/')}/storage/v1/object/{BUCKET}/{urllib.parse.quote(storage_path,safe='/')}"
-    h=headers(); h['x-upsert']='true'; h['Content-Type']=content_type or mimetypes.guess_type(local.name)[0] or 'application/octet-stream'
+    h=headers()
+    h['Content-Type']=content_type or mimetypes.guess_type(local.name)[0] or 'application/octet-stream'
+    # New deterministic paths are normally inserts. Only request upsert when an
+    # object exists but has a different size.
+    if remote_size is not None:
+        h['x-upsert']='true'
     with local.open('rb') as f:
         r=requests.post(url,headers=h,data=f,timeout=(30,7200))
     if r.status_code>=400:
         raise RuntimeError(f'Upload failed {storage_path}: {r.status_code} {r.text[:300]}')
+    return 'uploaded'
 
 
 def upload_bytes(base: str, data: bytes, storage_path: str, content_type='application/json') -> None:
@@ -135,6 +165,8 @@ def main() -> None:
     print(f'Found {len(videos)} videos and {len(index_files)} index files')
 
     assets=[]
+    uploaded=0
+    skipped=0
     for i,video in enumerate(videos,1):
         rel=safe_rel(video,root)
         digest=hashlib.sha256(rel.encode('utf-8')).hexdigest()[:16]
@@ -152,8 +184,13 @@ def main() -> None:
         }
         assets.append(item)
         if not args.dry_run:
-            print(f'[{i}/{len(videos)}] upload {rel}')
-            upload(base,video,storage_path)
+            result=upload(base,video,storage_path)
+            if result == 'skipped':
+                skipped += 1
+                print(f'[{i}/{len(videos)}] skip existing {rel}')
+            else:
+                uploaded += 1
+                print(f'[{i}/{len(videos)}] uploaded {rel}')
 
     index_entries=[]
     for path,text in zip(index_files,index_texts):
@@ -165,7 +202,7 @@ def main() -> None:
             upload(base,path,storage_path)
 
     catalog={
-        'version':1,
+        'version':2,
         'generated_at':datetime.now(timezone.utc).isoformat(),
         'source_root_label':'C:\\LeonidanosVideoPipeline',
         'owner_approved':True,
@@ -180,5 +217,6 @@ def main() -> None:
     else:
         upload_bytes(base,payload,f'{PREFIX}/catalog.json')
         print(f'Uploaded catalog with {len(assets)} approved videos')
+        print(f'Sync summary: uploaded={uploaded}, skipped_existing={skipped}')
 
 if __name__=='__main__': main()
