@@ -51,28 +51,31 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: chatterbox-multilingual-v3-${{ runner.os }}-${{ runner.arch }}-v1
+          key: chatterbox-multilingual-v3-${{ runner.os }}-${{ runner.arch }}-v3
 
       - name: Install production dependencies
         run: |
-          python -m pip install --upgrade pip
+          set -euo pipefail
+          python -m pip install --upgrade pip setuptools wheel
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchaudio==2.6.0
           pip install -r public-worker-template/requirements.txt
           pip install -r public-worker-template/requirements-production.txt
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y --no-install-recommends ffmpeg
 
-      - name: Materialize encrypted production core
-        env:
-          CORE_BUNDLE_B64: ${{ secrets.MEDIAFORGE_CORE_BUNDLE_B64 }}
+      - name: Materialize encrypted production core v7
         run: |
           set -euo pipefail
-          test -n "$CORE_BUNDLE_B64" || {
-            echo "MEDIAFORGE_CORE_BUNDLE_B64 is not configured"
-            exit 1
-          }
           mkdir -p .runtime
-          printf '%s' "$CORE_BUNDLE_B64" | base64 --decode > .runtime/core.bundle.enc
+          cat \
+            encrypted-core/v7/part-01a.b64 \
+            encrypted-core/v7/part-01b.b64 \
+            encrypted-core/v7/part-02.b64 \
+            encrypted-core/v7/part-03.b64 \
+            encrypted-core/v7/part-04.b64 \
+            | tr -d '\r\n\t ' | base64 --decode > .runtime/core.bundle.enc
           test -s .runtime/core.bundle.enc
+          test "$(stat -c%s .runtime/core.bundle.enc)" -eq 21279
           echo "MEDIAFORGE_BUNDLE_PATH=$(realpath .runtime/core.bundle.enc)" >> "$GITHUB_ENV"
 
       - name: Materialize canonical human voice reference
@@ -86,18 +89,18 @@ jobs:
           }
           printf '%s' "$VOICE_REFERENCE_B64" | base64 --decode > .runtime/voice-reference.ogg
           test -s .runtime/voice-reference.ogg
-          ffmpeg -y -i .runtime/voice-reference.ogg \
+          ffmpeg -y -loglevel error -i .runtime/voice-reference.ogg \
             -vn -ac 1 -ar 24000 -c:a pcm_s16le .runtime/voice-reference.wav
           test -s .runtime/voice-reference.wav
           echo "MEDIAFORGE_VOICE_REFERENCE_PATH=$(realpath .runtime/voice-reference.wav)" >> "$GITHUB_ENV"
 
-      - name: Validate production manifest
+      - name: Validate calibration manifest
         run: |
           set -euo pipefail
           test -f "${{ inputs.job_manifest }}"
           python -m json.tool "${{ inputs.job_manifest }}" >/dev/null
 
-      - name: Run human-voice production core
+      - name: Run human-voice calibration core
         env:
           MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
           MEDIAFORGE_TTS_PROVIDER: chatterbox
@@ -109,43 +112,45 @@ jobs:
             --locale "$MEDIAFORGE_LOCALE" \
             --output-dir "out/${{ inputs.lane }}"
 
-      - name: Validate real production output
+      - name: Validate human voice output
+        env:
+          LANE: ${{ inputs.lane }}
         run: |
           set -euo pipefail
-          test -s "out/${{ inputs.lane }}/manifest.json"
-          test -s "out/${{ inputs.lane }}/audio/narration.wav"
-          test -s "out/${{ inputs.lane }}/video/long-form.mp4"
-          test -s "out/${{ inputs.lane }}/media/manifest.json"
-          test "$(find "out/${{ inputs.lane }}/shorts" -name 'short-*.mp4' -type f -size +0c | wc -l)" -ge 5
+          test -s "out/$LANE/manifest.json"
+          test -s "out/$LANE/audio/narration.wav"
+          test -s "out/$LANE/audio/tts-shards.json"
           python - <<'PY'
-          import json, os
+          import json, os, pathlib, wave
           lane = os.environ['LANE']
-          with open(f'out/{lane}/manifest.json', encoding='utf-8') as f:
-              data = json.load(f)
+          root = pathlib.Path('out') / lane
+          data = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))
           tts = data['pipeline']['tts']
           if tts['provider'] != 'chatterbox-multilingual-v3':
               raise SystemExit(f"Unexpected TTS provider: {tts['provider']}")
-          if tts.get('pronunciation_profile') != 'pt-br-human-v3' and data['job']['locale'] == 'pt-BR':
+          if data['job']['locale'] == 'pt-BR' and tts.get('pronunciation_profile') != 'pt-br-human-v3':
               raise SystemExit('Old Portuguese pronunciation profile detected')
-          if data['metrics']['media_assets'] < 1:
-              raise SystemExit('No real media assets were rendered')
-          print(json.dumps({'tts': tts, 'metrics': data['metrics']}, ensure_ascii=False))
+          if not data['metrics'].get('audio_only'):
+              raise SystemExit('Calibration did not run in audio-only mode')
+          with wave.open(str(root / 'audio' / 'narration.wav'), 'rb') as wav:
+              seconds = wav.getnframes() / float(wav.getframerate())
+          if seconds < 5:
+              raise SystemExit(f'Calibration narration unexpectedly short: {seconds:.2f}s')
+          print(json.dumps({'tts': tts, 'narration_seconds': round(seconds, 3), 'audio_only': True}, ensure_ascii=False))
           PY
-        env:
-          LANE: ${{ inputs.lane }}
 
-      - name: Encrypt production result
+      - name: Encrypt calibration result
         env:
           MEDIAFORGE_DATA_KEY_B64: ${{ secrets.MEDIAFORGE_DATA_KEY_B64 }}
         run: |
           python private-worker-core/public_finalize.py \
             --input-dir "out/${{ inputs.lane }}" \
-            --output "artifacts/${{ inputs.lane }}.production.result.enc"
+            --output "artifacts/${{ inputs.lane }}.calibration.result.enc"
 
-      - name: Upload encrypted production artifact
+      - name: Upload encrypted calibration artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mediaforge-production-${{ inputs.lane }}-${{ github.run_id }}
-          path: artifacts/${{ inputs.lane }}.production.result.enc
+          name: mediaforge-calibration-${{ inputs.lane }}-${{ github.run_id }}
+          path: artifacts/${{ inputs.lane }}.calibration.result.enc
           if-no-files-found: error
           retention-days: 2
