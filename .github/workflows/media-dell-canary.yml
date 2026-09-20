@@ -150,6 +150,21 @@ jobs:
           print(json.dumps({'status':'media_preflight_ok','selected_unique':selected,'required_unique':required,'mapped_segments':len(ids),'scope':data.get('scope'),'stale_catalog_assets_skipped':len(data.get('unavailable_catalog_assets') or [])},ensure_ascii=False))
           PY
 
+      - name: Verify encrypted core hardening before expensive TTS
+        env:
+          MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
+          MEDIAFORGE_TTS_STRICT_CHUNK_ORDER: '1'
+          MEDIAFORGE_STRICT_UNIQUE_MEDIA: '1'
+        run: |
+          set -euo pipefail
+          python public-worker-template/worker.py \
+            --bundle "$MEDIAFORGE_BUNDLE_PATH" \
+            --job .runtime/dell-canary-job.json \
+            --lane pt-1 \
+            --locale pt-BR \
+            --output-dir out/dell-canary \
+            --verify-only
+
       - name: Render long-form and Shorts
         id: render
         env:
