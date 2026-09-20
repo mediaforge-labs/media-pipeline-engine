@@ -30,6 +30,12 @@ def main():
     a=ap.parse_args(); script=pathlib.Path(a.script_file).read_text(encoding='utf-8');query=a.title+'\n'+script
     gw=(req_json('GET','mediaforge_asset_gateways',params={'select':'gateway_id,public_url,status,heartbeat_at','gateway_id':f'eq.{a.gateway_id}','limit':'1'}) or [])
     if not gw or gw[0].get('status')!='online' or not gw[0].get('public_url'):raise SystemExit('Dell asset gateway is offline')
+    try:
+        beat=datetime.fromisoformat(str(gw[0].get('heartbeat_at') or '').replace('Z','+00:00'))
+    except Exception:
+        raise SystemExit('Dell asset gateway heartbeat is invalid')
+    if datetime.now(timezone.utc)-beat>timedelta(minutes=2):
+        raise SystemExit('Dell asset gateway heartbeat is stale')
     assets=req_json('GET','mediaforge_assets',params={'select':'asset_id,relative_path,file_name,size_bytes,duration_seconds,description,context,tags','approved':'eq.true','source_kind':'eq.dell','limit':'2000'}) or []
     ranked=sorted(((score(x,query),x) for x in assets),key=lambda x:x[0],reverse=True); chosen=[x for _,x in ranked[:a.max_assets]]
     if not chosen:raise SystemExit('No approved Dell assets available')
