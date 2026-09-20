@@ -63,20 +63,14 @@ def safe_extract_tar_gz(payload: bytes, destination: pathlib.Path) -> None:
 
 
 def apply_runtime_source_hardening(core_dir: pathlib.Path) -> dict[str, int]:
-    """Harden only the ephemeral decrypted copy; plaintext is never committed.
-
-    The migrated v7 selector used a soft reuse penalty, which still allowed a used
-    clip to win. Strict mode converts that into a hard exclusion. TTS-related files
-    are also inspected; if they use Python executors, worker count is forced to one
-    so completion order cannot scramble narration chunks.
-    """
+    """Harden only the ephemeral decrypted copy; plaintext is never committed."""
     stats = {
         "python_sources": 0,
         "unique_media_sources": 0,
         "unique_media_patches": 0,
         "tts_sources_seen": 0,
         "tts_parallel_sources": 0,
-        "tts_worker_patches": 0,
+        "syntax_verified_sources": 0,
     }
 
     for path in core_dir.rglob("*.py"):
@@ -84,26 +78,14 @@ def apply_runtime_source_hardening(core_dir: pathlib.Path) -> dict[str, int]:
         text = path.read_text(encoding="utf-8", errors="ignore")
         original = text
         lower = text.lower()
-        is_tts_source = "chunk" in lower and ("wav" in lower or "tts" in lower)
 
-        if is_tts_source:
+        if "chunk" in lower and ("wav" in lower or "tts" in lower):
             stats["tts_sources_seen"] += 1
             if "threadpoolexecutor" in lower or "processpoolexecutor" in lower or "as_completed" in lower:
                 stats["tts_parallel_sources"] += 1
 
-            # Even if the private source does not consume MEDIAFORGE_TTS_MAX_WORKERS,
-            # force local executor concurrency to one in strict mode. With one worker,
-            # as_completed() cannot reorder simultaneously completed narration chunks.
-            if enabled("MEDIAFORGE_TTS_STRICT_CHUNK_ORDER", True):
-                patterns = (
-                    r'(ThreadPoolExecutor\s*\(\s*max_workers\s*=\s*)[^,)]+',
-                    r'(ProcessPoolExecutor\s*\(\s*max_workers\s*=\s*)[^,)]+',
-                )
-                for pattern in patterns:
-                    text, count = re.subn(pattern, r'\g<1>1', text)
-                    stats["tts_worker_patches"] += count
-
-        # Common selector inherited from the Leonidanos renderer.
+        # v7 inherited a soft reuse penalty. A used source must instead be removed from
+        # candidacy completely. This patch affects only the decrypted temporary copy.
         if "use_counts" in text and "relative_path" in text:
             stats["unique_media_sources"] += 1
             pattern = re.compile(
@@ -122,9 +104,6 @@ def apply_runtime_source_hardening(core_dir: pathlib.Path) -> dict[str, int]:
 
             text, count = pattern.subn(add_guard, text)
             stats["unique_media_patches"] += count
-
-            # Remove the legacy soft penalty after hard exclusion. Reuse must never be
-            # a score tradeoff in strict mode.
             text = re.sub(
                 r'^\s*score\s*-=?\s*use_counts\[path\]\s*\*\s*[0-9.]+\s*$',
                 '',
@@ -135,53 +114,64 @@ def apply_runtime_source_hardening(core_dir: pathlib.Path) -> dict[str, int]:
         if text != original:
             path.write_text(text, encoding="utf-8")
 
+    # Compile every private Python source after hotfixing. This catches a bad runtime
+    # patch now, before Chatterbox synthesis or FFmpeg rendering consumes an hour.
+    for path in core_dir.rglob("*.py"):
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        try:
+            compile(source, str(path), "exec")
+        except SyntaxError as exc:
+            raise SystemExit(
+                f"Private core hardening produced invalid Python before TTS/render: "
+                f"{path.relative_to(core_dir)}:{exc.lineno}: {exc.msg}"
+            ) from exc
+        stats["syntax_verified_sources"] += 1
+
     return stats
 
 
 def verify_runtime_hardening(stats: dict[str, int]) -> None:
-    """Fail before TTS/render if the encrypted core cannot prove strict guarantees."""
+    """Fail before TTS/render unless strict guarantees are actually present."""
     strict_unique = enabled("MEDIAFORGE_STRICT_UNIQUE_MEDIA", True)
     strict_tts = enabled("MEDIAFORGE_TTS_STRICT_CHUNK_ORDER", True)
-
     errors: list[str] = []
+
+    if stats["python_sources"] < 1 or stats["syntax_verified_sources"] != stats["python_sources"]:
+        errors.append("not every private Python source passed post-hardening syntax validation")
+
     if strict_unique:
         if stats["unique_media_sources"] < 1:
             errors.append("no private media selector containing use_counts/relative_path was found")
         if stats["unique_media_patches"] < 1:
             errors.append("strict no-reuse guard was not injected into the private media selector")
 
-    if strict_tts:
-        if stats["tts_sources_seen"] < 1:
-            errors.append("no private TTS/chunk source was found for ordered-audio verification")
-        if stats["tts_parallel_sources"] > 0 and stats["tts_worker_patches"] < 1:
-            # The sitecustomize natural-sort guard still protects filesystem ordering,
-            # but an unpatched concurrent executor could reorder in-memory results.
-            errors.append("parallel TTS code was detected but its executor could not be forced to one worker")
+    if strict_tts and stats["tts_sources_seen"] < 1:
+        errors.append("no private TTS/chunk source was found for ordered-audio verification")
 
     payload = {
         "runtime_hardening": {
             **stats,
             "strict_unique_media": strict_unique,
             "strict_tts_chunk_order": strict_tts,
+            "ordered_future_guard": strict_tts,
+            "natural_filesystem_order_guard": strict_tts,
             "verified": not errors,
         }
     }
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-
     if errors:
         raise SystemExit("Runtime hardening verification failed before TTS/render: " + "; ".join(errors))
 
 
 def install_runtime_guards(core_dir: pathlib.Path, env: dict[str, str]) -> None:
-    """Install deterministic filesystem ordering and subprocess diagnostics.
-
-    chunk-0001.wav, chunk-0002.wav, ... are always returned in natural numeric order
-    from glob, pathlib and os.listdir inside the private runtime.
-    """
+    """Install deterministic TTS ordering and optional subprocess diagnostics."""
     guard_dir = core_dir / ".mediaforge-guards"
     guard_dir.mkdir(parents=True, exist_ok=True)
     diagnostics = enabled("MEDIAFORGE_DEBUG_SUBPROCESS_STDERR", False)
-    guard_code = f'''import glob as _glob
+    strict_tts = enabled("MEDIAFORGE_TTS_STRICT_CHUNK_ORDER", True)
+
+    guard_code = f'''import concurrent.futures as _cf
+import glob as _glob
 import os as _os
 import pathlib as _pathlib
 import re as _re
@@ -218,6 +208,30 @@ _glob.glob = _sorted_glob
 _os.listdir = _sorted_listdir
 _pathlib.Path.glob = _sorted_path_glob
 _pathlib.Path.rglob = _sorted_path_rglob
+
+_STRICT_TTS = {strict_tts!r}
+if _STRICT_TTS:
+    # Preserve submission order even if private TTS code uses as_completed(). This is
+    # stronger than relying on filesystem ordering and directly prevents the observed
+    # sentence/chunk swap around 00:56.
+    def _ordered_as_completed(futures, timeout=None):
+        ordered = list(futures)
+        for future in ordered:
+            future.result(timeout=timeout)
+            yield future
+    _cf.as_completed = _ordered_as_completed
+
+    _OriginalThreadPoolExecutor = _cf.ThreadPoolExecutor
+    class _SerialThreadPoolExecutor(_OriginalThreadPoolExecutor):
+        def __init__(self, max_workers=None, *args, **kwargs):
+            super().__init__(max_workers=1, *args, **kwargs)
+    _cf.ThreadPoolExecutor = _SerialThreadPoolExecutor
+
+    _OriginalProcessPoolExecutor = _cf.ProcessPoolExecutor
+    class _SerialProcessPoolExecutor(_OriginalProcessPoolExecutor):
+        def __init__(self, max_workers=None, *args, **kwargs):
+            super().__init__(max_workers=1, *args, **kwargs)
+    _cf.ProcessPoolExecutor = _SerialProcessPoolExecutor
 
 _DIAGNOSTICS = {diagnostics!r}
 _original_run = _subprocess.run
