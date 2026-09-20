@@ -62,11 +62,18 @@ jobs:
             --locale "${{ matrix.locale }}" \
             --output-dir "out/${{ matrix.lane }}"
 
-      - name: Upload worker output
-        if: always()
+      - name: Encrypt worker result
+        env:
+          MEDIAFORGE_DATA_KEY_B64: ${{ secrets.MEDIAFORGE_DATA_KEY_B64 }}
+        run: |
+          python private-worker-core/public_finalize.py \
+            --input-dir "out/${{ matrix.lane }}" \
+            --output "artifacts/${{ matrix.lane }}.result.enc"
+
+      - name: Upload encrypted result
         uses: actions/upload-artifact@v4
         with:
           name: mediaforge-${{ matrix.lane }}-${{ github.run_id }}
-          path: out/${{ matrix.lane }}/
-          if-no-files-found: warn
+          path: artifacts/${{ matrix.lane }}.result.enc
+          if-no-files-found: error
           retention-days: 2
