@@ -14,7 +14,7 @@ on:
       job_manifest:
         description: Production test manifest
         required: false
-        default: jobs/production-test.json
+        default: jobs/voice-calibration.json
 
 permissions:
   contents: read
