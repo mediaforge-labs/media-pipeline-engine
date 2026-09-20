@@ -30,23 +30,20 @@ if ([string]::IsNullOrWhiteSpace($env:SUPABASE_S3_SECRET_ACCESS_KEY)) {
   $env:SUPABASE_S3_SECRET_ACCESS_KEY = Read-SecretText 'Cole o S3 Secret Access Key do Supabase (nao sera exibido)'
 }
 
-# boto3/botocore 1.36+ changed the default S3 checksum behavior. Supabase S3
-# does not accept those flexible checksum headers on PutObject. Force the
-# compatible behavior both by version pinning and environment configuration.
 $env:AWS_REQUEST_CHECKSUM_CALCULATION = 'when_required'
 $env:AWS_RESPONSE_CHECKSUM_VALIDATION = 'when_required'
 $env:AWS_EC2_METADATA_DISABLED = 'true'
 
 try {
-  Write-Host 'Instalando cliente S3 compativel e fixado...'
+  Write-Host 'Instalando cliente S3 fixado e leitor de PDF...'
   & $python.Source -m pip install --disable-pip-version-check --upgrade `
-    'boto3==1.35.99' 'botocore==1.35.99' 's3transfer==0.10.4'
-  if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar boto3/botocore compativeis.' }
+    'boto3==1.40.45' 'botocore==1.40.45' 's3transfer==0.14.0' 'pypdf==6.1.1'
+  if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar dependencias do sincronizador.' }
 
-  Write-Host 'Validando credenciais, endpoint, bucket e upload S3...'
+  Write-Host 'Validando credenciais, endpoint, bucket e escrita real no S3...'
   & $python.Source tools\s3_probe.py
   if ($LASTEXITCODE -ne 0) {
-    throw 'Preflight S3 falhou. Nenhum video foi enviado. Veja a mensagem acima.'
+    throw 'Preflight S3 falhou. Nenhum video foi enviado. Veja a mensagem S3 PREFLIGHT ERROR acima.'
   }
 
   $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
@@ -54,8 +51,8 @@ try {
     Write-Warning 'ffprobe nao foi encontrado. O upload funciona, mas algumas duracoes ficarao vazias no catalogo.'
   }
 
-  Write-Host "Sincronizando biblioteca aprovada em $Root via Supabase S3..."
-  & $python.Source tools\sync_video_library.py --root $Root
+  Write-Host "Sincronizando biblioteca aprovada em $Root via Supabase S3 direto..."
+  & $python.Source tools\sync_video_library_v2.py --root $Root
   if ($LASTEXITCODE -ne 0) { throw "Sincronizacao falhou com codigo $LASTEXITCODE" }
 
   Write-Host 'Sincronizacao concluida. O Dell nao e necessario para os renders.'
