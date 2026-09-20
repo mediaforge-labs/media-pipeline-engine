@@ -75,6 +75,22 @@ jobs:
           test -s .runtime/core.bundle.enc
           echo "MEDIAFORGE_BUNDLE_PATH=$(realpath .runtime/core.bundle.enc)" >> "$GITHUB_ENV"
 
+      - name: Materialize canonical human voice reference
+        env:
+          VOICE_REFERENCE_B64: ${{ secrets.MEDIAFORGE_VOICE_REFERENCE_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$VOICE_REFERENCE_B64" || {
+            echo "MEDIAFORGE_VOICE_REFERENCE_B64 is not configured"
+            exit 1
+          }
+          printf '%s' "$VOICE_REFERENCE_B64" | base64 --decode > .runtime/voice-reference.ogg
+          test -s .runtime/voice-reference.ogg
+          ffmpeg -y -i .runtime/voice-reference.ogg \
+            -vn -ac 1 -ar 24000 -c:a pcm_s16le .runtime/voice-reference.wav
+          test -s .runtime/voice-reference.wav
+          echo "MEDIAFORGE_VOICE_REFERENCE_PATH=$(realpath .runtime/voice-reference.wav)" >> "$GITHUB_ENV"
+
       - name: Validate production manifest
         run: |
           set -euo pipefail
