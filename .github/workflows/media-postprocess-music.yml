@@ -102,7 +102,7 @@ jobs:
           ffmpeg -hide_banner -y \
             -i "$SOURCE_VIDEO" \
             -stream_loop -1 -i .runtime/music.mp3 \
-            -filter_complex "[0:a]aresample=48000,aformat=channel_layouts=stereo[n];[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=0.075[m];[m][n]sidechaincompress=threshold=0.025:ratio=8:attack=18:release=320[ducked];[n][ducked]amix=inputs=2:duration=first:weights='1 1':normalize=0,alimiter=limit=0.96[out]" \
+            -filter_complex "[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[nsc][nmix];[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=0.075[m];[m][nsc]sidechaincompress=threshold=0.025:ratio=8:attack=18:release=320[ducked];[nmix][ducked]amix=inputs=2:duration=first:weights='1 1':normalize=0,alimiter=limit=0.96[out]" \
             -map 0:v:0 -map "[out]" \
             -c:v copy -c:a aac -b:a 192k -ar 48000 -ac 2 \
             -shortest -movflags +faststart \
