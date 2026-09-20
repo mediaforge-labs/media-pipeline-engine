@@ -38,7 +38,7 @@ def control(action: str, body: dict | None = None):
     base = os.environ['SUPABASE_URL'].rstrip('/')
     key = os.environ['SUPABASE_SECRET_KEY']
     url = f'{base}/functions/v1/mediaforge-dell-control'
-    headers = {'apikey': key, 'Content-Type': 'application/json', 'User-Agent': 'MediaForge-GitHub/4.0'}
+    headers = {'apikey': key, 'Content-Type': 'application/json', 'User-Agent': 'MediaForge-GitHub/4.1'}
     if body is None:
         response = requests.get(url, headers=headers, params={'action': action}, timeout=60)
     else:
@@ -64,6 +64,10 @@ def asset_text(asset: dict) -> str:
     ).lower()
 
 
+def asset_size(asset: dict) -> int:
+    return max(0, int(asset.get('size_bytes') or 0))
+
+
 def score(asset: dict, query: str) -> float:
     hay = asset_text(asset)
     q = toks(query)
@@ -76,7 +80,7 @@ def score(asset: dict, query: str) -> float:
     # deterministic tie-breaker, never random between runs
     value += int(hashlib.sha256((query + str(asset['asset_id'])).encode()).hexdigest()[:4], 16) / 65535
     # Prefer already-cut, lighter clips when semantic scores are close.
-    size_mb = float(asset.get('size_bytes') or 0) / 1024 / 1024
+    size_mb = asset_size(asset) / 1024 / 1024
     value -= min(size_mb, 250.0) * 0.004
     return value
 
@@ -140,53 +144,99 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
             f'but --max-assets={max_assets}. Increase the pool before TTS/render.'
         )
 
+    # Prove up front that the requested number of distinct files can fit even in the
+    # best possible packing. This is cheap and avoids beginning downloads/TTS in an
+    # impossible configuration.
+    smallest_required = sorted(asset_size(item) for item in assets)[:required_unique]
+    minimum_possible_bytes = sum(smallest_required)
+    if len(smallest_required) < required_unique or minimum_possible_bytes > byte_budget:
+        raise SystemExit(
+            f'Media preflight cannot fit {required_unique} unique clips inside the runner byte budget. '
+            f'Minimum possible set needs {minimum_possible_bytes / 1024 / 1024 / 1024:.3f} GiB, '
+            f'budget is {byte_budget / 1024 / 1024 / 1024:.3f} GiB.'
+        )
+
     target_pool = min(len(assets), max_assets, max(required_unique + 16, 64))
     used: set[str] = set()
     chosen: list[dict] = []
     selection_rows: list[dict] = []
     total_bytes = 0
 
-    def can_fit(item: dict) -> bool:
-        return total_bytes + int(item.get('size_bytes') or 0) <= byte_budget
+    def unused_assets() -> list[dict]:
+        return [item for item in assets if str(item.get('asset_id')) not in used]
 
-    # First pass: one different source file for each narration-sized segment.
-    for segment_index, segment in enumerate(segments):
-        candidates = [item for item in assets if str(item.get('asset_id')) not in used and can_fit(item)]
+    def candidates_that_preserve_capacity(remaining_slots_after_pick: int) -> list[dict]:
+        """Return candidates that still leave room for all required unique clips.
+
+        The previous implementation greedily picked the most semantically relevant clip
+        that fit *right now*. Near the end of an 8 GiB budget that could strand the
+        selector a few clips short. This version reserves enough bytes for the smallest
+        remaining distinct clips before accepting each semantic pick.
+        """
+        pool = unused_assets()
+        if remaining_slots_after_pick <= 0:
+            return [item for item in pool if total_bytes + asset_size(item) <= byte_budget]
+
+        by_size = sorted(pool, key=asset_size)
+        if len(by_size) <= remaining_slots_after_pick:
+            return []
+
+        reserve_base = by_size[:remaining_slots_after_pick]
+        reserve_ids = {str(item['asset_id']) for item in reserve_base}
+        reserve_sum = sum(asset_size(item) for item in reserve_base)
+        replacement = asset_size(by_size[remaining_slots_after_pick])
+
+        feasible: list[dict] = []
+        for item in pool:
+            item_id = str(item['asset_id'])
+            item_bytes = asset_size(item)
+            reserve = reserve_sum
+            if item_id in reserve_ids:
+                reserve = reserve_sum - item_bytes + replacement
+            if total_bytes + item_bytes + reserve <= byte_budget:
+                feasible.append(item)
+        return feasible
+
+    # First pass: one different source file for every required narration-sized scene.
+    # Semantic relevance remains the primary rank, but a pick is rejected if it would
+    # make it mathematically impossible to fit the remaining unique clips in the runner.
+    for segment_index, segment in enumerate(segments[:required_unique]):
+        remaining_required_after_pick = required_unique - len(chosen) - 1
+        candidates = candidates_that_preserve_capacity(remaining_required_after_pick)
         if not candidates:
             break
-        ranked = sorted(candidates, key=lambda item: score(item, title + '\n' + segment), reverse=True)
+        query = title + '\n' + segment
+        ranked = sorted(candidates, key=lambda item: score(item, query), reverse=True)
         item = ranked[0]
         aid = str(item['asset_id'])
         used.add(aid)
-        total_bytes += int(item.get('size_bytes') or 0)
+        total_bytes += asset_size(item)
         enriched = dict(item)
         original_context = str(enriched.get('context') or '').strip()
         enriched['context'] = (original_context + '\nNarration context: ' + segment).strip()
         enriched['mediaforge_segment_index'] = segment_index
         enriched['mediaforge_segment_text'] = segment
-        enriched['mediaforge_selection_score'] = round(score(item, title + '\n' + segment), 4)
+        enriched['mediaforge_selection_score'] = round(score(item, query), 4)
         enriched['mediaforge_max_uses'] = 1
         enriched['mediaforge_gta_vi_only'] = True
         chosen.append(enriched)
         selection_rows.append({'segment_index': segment_index, 'asset_id': aid, 'segment': segment})
-        if len(chosen) >= target_pool:
-            break
 
     if len(chosen) < required_unique:
         raise SystemExit(
-            f'Media preflight found only {len(chosen)} unique clips within the runner byte budget; '
-            f'{required_unique} are required. Aborting before expensive TTS/render instead of reusing clips.'
+            f'Media preflight selected only {len(chosen)} unique clips although {required_unique} are required. '
+            f'The capacity-reserving selector refused to reuse media or exceed the runner budget.'
         )
 
     # Fill a relevance buffer from still-unused GTA VI clips so the encrypted scene planner
     # has alternatives if a selected clip is too short or unsuitable for a specific scene.
     whole_query = title + '\n' + script
-    remaining = [item for item in assets if str(item.get('asset_id')) not in used]
+    remaining = unused_assets()
     remaining.sort(key=lambda item: score(item, whole_query), reverse=True)
     for item in remaining:
         if len(chosen) >= target_pool:
             break
-        item_bytes = int(item.get('size_bytes') or 0)
+        item_bytes = asset_size(item)
         if total_bytes + item_bytes > byte_budget:
             continue
         aid = str(item['asset_id'])
@@ -255,7 +305,7 @@ def main():
             url = f"{status['public_url'].rstrip('/')}/asset/{request_id}/{item['asset_id']}"
             request = urllib.request.Request(
                 url,
-                headers={'X-MediaForge-Request-Token': token, 'User-Agent': 'MediaForge-GitHub/4.0'},
+                headers={'X-MediaForge-Request-Token': token, 'User-Agent': 'MediaForge-GitHub/4.1'},
             )
             with urllib.request.urlopen(request, timeout=1800) as source, out.open('wb') as target:
                 while True:
