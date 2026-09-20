@@ -39,6 +39,7 @@ jobs:
           python -m py_compile \
             public-worker-template/build_canary_job.py \
             public-worker-template/dell_asset_client.py \
+            public-worker-template/dell_asset_client_v5.py \
             public-worker-template/worker.py \
             public-worker-template/validate_render.py
 
@@ -118,7 +119,7 @@ jobs:
           set -euo pipefail
           test -n "$SUPABASE_SECRET_KEY"
           TITLE="$(python -c "import json;print(json.load(open('.runtime/dell-canary-job.json'))['jobs']['pt-1']['title'])")"
-          python public-worker-template/dell_asset_client.py \
+          python public-worker-template/dell_asset_client_v5.py \
             --title "$TITLE" \
             --script-file .runtime/dell-canary-script.txt \
             --dest .runtime/dell-assets \
@@ -131,7 +132,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json, pathlib
+          import json, pathlib, subprocess
           p=pathlib.Path('.runtime/dell-assets/mediaforge-selection.json')
           data=json.loads(p.read_text(encoding='utf-8'))
           selected=int(data.get('downloaded_unique_assets') or data.get('selected_unique_assets') or 0)
@@ -147,7 +148,15 @@ jobs:
               raise SystemExit('duplicate assets detected in semantic media map')
           if segments and len(ids) != len(segments):
               raise SystemExit(f'incomplete semantic mapping: mapped={len(ids)}, segments={len(segments)}')
-          print(json.dumps({'status':'media_preflight_ok','selected_unique':selected,'required_unique':required,'mapped_segments':len(ids),'scope':data.get('scope'),'stale_catalog_assets_skipped':len(data.get('unavailable_catalog_assets') or [])},ensure_ascii=False))
+          catalog=json.loads(pathlib.Path('.runtime/dell-assets/Catalogo geral.json').read_text(encoding='utf-8'))
+          files=[pathlib.Path('.runtime/dell-assets')/a['local_name'] for a in catalog.get('assets',[])]
+          if len(files) != selected:
+              raise SystemExit(f'catalog/file count mismatch: files={len(files)}, selected={selected}')
+          for f in files:
+              if not f.is_file() or f.stat().st_size <= 0:
+                  raise SystemExit(f'invalid downloaded media: {f}')
+              subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=codec_name,width,height','-of','json',str(f)],check=True,stdout=subprocess.DEVNULL)
+          print(json.dumps({'status':'media_preflight_ok','selected_unique':selected,'required_unique':required,'mapped_segments':len(ids),'scope':data.get('scope'),'stale_catalog_assets_skipped':len(data.get('unavailable_catalog_assets') or []),'ffprobe_verified':len(files)},ensure_ascii=False))
           PY
 
       - name: Verify encrypted core hardening before expensive TTS
