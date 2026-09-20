@@ -1,5 +1,5 @@
 {
-  "reason": "retest_gateway_v3_after_control_json_hardening",
+  "reason": "post_gateway_v3_refresh_zero_stale_validation",
   "publish": false,
-  "requested_at": "2026-09-20T23:38:00Z"
+  "requested_at": "2026-09-20T23:46:00Z"
 }
