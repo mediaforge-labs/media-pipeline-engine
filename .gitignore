@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime output
+out/
+.tmp/
+*.log
+
+# Never commit plaintext proprietary core material
+private-worker-core/plaintext/
+private-worker-core/decrypted/
+private-worker-core/**/*.py
+!private-worker-core/README.md
+
+# Local secrets / environment
+.env
+.env.*
+*.pem
+*.key
+*.secret
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
