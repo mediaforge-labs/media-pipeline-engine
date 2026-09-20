@@ -57,6 +57,21 @@ SECURITY.md
 
 The smoke workflow exercises the complete orchestration path without consuming production TTS. It creates a consolidated WAV, timed SRT captions, a 16:9 MP4, five 9:16 MP4 Shorts per lane, encrypted outputs, and four parallel GitHub Actions artifacts.
 
+## Human voice profile v3
+
+The production core now carries the canonical Leonidanos voice reference **inside the encrypted runtime bundle**. The reference is not a previously generated TTS file and is never committed in plaintext.
+
+Portuguese production uses a dedicated `pt-br-human-v3` pronunciation profile. The profile keeps acronyms connected and provides TTS-only spoken forms for recurring English/gaming vocabulary such as `GTA`, `gameplay`, `minigame`, `Rockstar Games`, `crossplay`, `Vice City` and related terms. Captions and visible copy keep the original spelling.
+
+The Chatterbox production profile was also moved back into a stable/natural range:
+
+- `temperature = 0.80`
+- `exaggeration = 0.50`
+- `cfg_weight = 0.35` for `pt-BR`
+- no artificial `1.10x` tempo acceleration (`tempo = 1.00`)
+- one canonical conditioning profile reused across all chunks
+- one deterministic seed reused across chunks to reduce voice drift
+
 ## Production validation
 
 `Media Production Test` is intentionally single-lane while the real voice and visual stack is being validated. Its initial choices are:
@@ -68,19 +83,18 @@ The production workflow:
 
 1. Installs the production Chatterbox dependency and FFmpeg.
 2. Restores/caches the Chatterbox model files.
-3. Materializes the encrypted proprietary core.
-4. Downloads the approved Leonidanos voice reference from the private `youtube-assets` Supabase bucket.
-5. Runs Chatterbox Multilingual V3 with the private runtime's deterministic voice configuration.
-6. Downloads only manifest-approved `official` or `licensed` media assets.
-7. Renders a 1920×1080 long-form video and at least five 1080×1920 Shorts.
-8. Validates the real TTS provider and rendered media.
-9. Encrypts the complete result before artifact upload.
+3. Materializes the encrypted proprietary core, including its canonical voice profile.
+4. Runs Chatterbox Multilingual V3 using the encrypted voice reference and pronunciation profile.
+5. Downloads only manifest-approved `official` or `licensed` media assets.
+6. Renders a 1920×1080 long-form video and at least five 1080×1920 Shorts.
+7. Validates the real TTS provider, pronunciation profile and rendered media.
+8. Encrypts the complete result before artifact upload.
 
 After PT and EN production validation pass, the same runtime can be scaled back out to parallel production lanes/shards.
 
 ## Required GitHub secrets
 
-The smoke workflow requires:
+Both the smoke and production workflows use only these MediaForge repository secrets:
 
 ```text
 MEDIAFORGE_CORE_KEY_B64
@@ -88,18 +102,9 @@ MEDIAFORGE_DATA_KEY_B64
 MEDIAFORGE_CORE_BUNDLE_B64
 ```
 
-The production validation additionally prefers a dedicated Supabase backend key:
-
-```text
-SUPABASE_SECRET_KEY
-```
-
-A legacy `SUPABASE_SERVICE_ROLE_KEY` is also supported as a fallback, but a dedicated `sb_secret_...` key is preferred because it can be rotated independently.
-
 - `MEDIAFORGE_CORE_KEY_B64` decrypts the proprietary runtime bundle.
 - `MEDIAFORGE_DATA_KEY_B64` encrypts completed lane outputs before artifact upload.
-- `MEDIAFORGE_CORE_BUNDLE_B64` holds the base64 representation of the encrypted runtime bundle.
-- `SUPABASE_SECRET_KEY` is used only inside the production runner to read the approved private voice reference from Supabase Storage.
+- `MEDIAFORGE_CORE_BUNDLE_B64` holds the base64 representation of the encrypted runtime bundle, including the encrypted canonical voice reference.
 
 Never commit the secret values or print them into workflow logs.
 
@@ -129,14 +134,14 @@ To keep even the encrypted binary out of the public repository, base64-encode `c
 
 ## Run the production validation
 
-After the encrypted core secret is updated to the current production-capable bundle and `SUPABASE_SECRET_KEY` is configured:
+After `MEDIAFORGE_CORE_BUNDLE_B64` is updated to the current human-voice bundle:
 
 1. Open **Actions → Media Production Test**.
 2. Choose `pt-1` first.
 3. Keep `jobs/production-test.json` as the manifest.
 4. Run the workflow and validate its encrypted artifact.
-5. Repeat with `en-1` after PT succeeds.
+5. Repeat with `en-1` only after PT succeeds.
 
 ## Security boundary
 
-Do not commit plaintext proprietary core code, API credentials, OAuth refresh tokens, `.env` files, decrypted runtime material, or other secrets. See `SECURITY.md` for the repository security policy.
+Do not commit plaintext proprietary core code, canonical voice-reference audio, API credentials, OAuth refresh tokens, `.env` files, decrypted runtime material, or other secrets. See `SECURITY.md` for the repository security policy.
