@@ -1,0 +1,8 @@
+{
+  "requested_at": "2026-09-20T04:50:27Z",
+  "lane": "pt-1",
+  "manifest": "jobs/voice-calibration.json",
+  "run_id": 35490148883,
+  "run_url": "https://github.com/mediaforge-labs/media-pipeline-engine/actions/runs/35490148883",
+  "state": "dispatched"
+}
