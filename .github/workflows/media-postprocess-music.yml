@@ -1,0 +1,128 @@
+name: MediaForge Music Postprocess (No Publish)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful canary run containing finished video
+        required: true
+        default: '35530699529'
+      track:
+        description: YouTube Audio Library filename in private storage
+        required: true
+        default: 'Digifunk - DivKid.mp3'
+  push:
+    paths:
+      - automation/music-remix-request.json
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  remix:
+    name: Add background music to finished artifact only
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve request
+        env:
+          INPUT_RUN: ${{ github.event.inputs.source_run_id }}
+          INPUT_TRACK: ${{ github.event.inputs.track }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          p=pathlib.Path('automation/music-remix-request.json')
+          cfg=json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}
+          run=(os.environ.get('INPUT_RUN') or cfg.get('source_run_id') or '35530699529').strip()
+          track=(os.environ.get('INPUT_TRACK') or cfg.get('track') or 'Digifunk - DivKid.mp3').strip()
+          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as f:
+              f.write(f'SOURCE_RUN_ID={run}\n')
+              f.write(f'MUSIC_TRACK={track}\n')
+          print('source_run_id=',run)
+          print('track=',track)
+          PY
+
+      - name: Download completed render artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mediaforge-dell-canary-${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+
+      - name: Locate finished video
+        run: |
+          set -euo pipefail
+          VIDEO="$(find source-artifact -type f -name 'long-form.mp4' -print -quit)"
+          test -n "$VIDEO"
+          echo "SOURCE_VIDEO=$(realpath "$VIDEO")" >> "$GITHUB_ENV"
+          echo "Finished source: $VIDEO"
+          ffprobe -v error -show_entries format=duration:stream=index,codec_type,codec_name,sample_rate,channels -of json "$VIDEO"
+
+      - name: Download selected private music track
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pathlib, requests, urllib.parse
+          base=os.environ['SUPABASE_URL'].rstrip('/')
+          key=os.environ['SUPABASE_SECRET_KEY']
+          track=os.environ['MUSIC_TRACK']
+          obj='youtube-audio-library/'+track
+          url=f"{base}/storage/v1/object/authenticated/youtube-assets/{urllib.parse.quote(obj,safe='/')}"
+          headers={'apikey':key,'User-Agent':'MediaForge-Music-Postprocess/1.0'}
+          if not key.startswith('sb_secret_'):
+              headers['Authorization']=f'Bearer {key}'
+          r=requests.get(url,headers=headers,timeout=180)
+          r.raise_for_status()
+          out=pathlib.Path('.runtime/music.mp3'); out.parent.mkdir(parents=True,exist_ok=True); out.write_bytes(r.content)
+          if out.stat().st_size < 100000: raise SystemExit('Downloaded music file is unexpectedly small')
+          print('music_bytes=',out.stat().st_size)
+          PY
+          ffprobe -v error -show_entries format=duration:stream=codec_name,sample_rate,channels -of json .runtime/music.mp3
+
+      - name: Mix narration and music without re-rendering video
+        run: |
+          set -euo pipefail
+          mkdir -p out/music-postprocess
+          ffmpeg -hide_banner -y \
+            -i "$SOURCE_VIDEO" \
+            -stream_loop -1 -i .runtime/music.mp3 \
+            -filter_complex "[0:a]aresample=48000,aformat=channel_layouts=stereo[n];[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=0.075[m];[m][n]sidechaincompress=threshold=0.025:ratio=8:attack=18:release=320[ducked];[n][ducked]amix=inputs=2:duration=first:weights='1 1':normalize=0,alimiter=limit=0.96[out]" \
+            -map 0:v:0 -map "[out]" \
+            -c:v copy -c:a aac -b:a 192k -ar 48000 -ac 2 \
+            -shortest -movflags +faststart \
+            out/music-postprocess/long-form-with-music-NO-PUBLISH.mp4
+
+      - name: Validate postprocessed file
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, subprocess, pathlib
+          src=pathlib.Path(os.environ['SOURCE_VIDEO'])
+          out=pathlib.Path('out/music-postprocess/long-form-with-music-NO-PUBLISH.mp4')
+          def probe(p):
+              return json.loads(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration:stream=codec_type,codec_name,sample_rate,channels','-of','json',str(p)]))
+          a,b=probe(src),probe(out)
+          da=float(a['format']['duration']); db=float(b['format']['duration'])
+          if abs(da-db)>1.0: raise SystemExit(f'duration mismatch: source={da} remix={db}')
+          vs=[x for x in b['streams'] if x.get('codec_type')=='video']; au=[x for x in b['streams'] if x.get('codec_type')=='audio']
+          if not vs or not au: raise SystemExit('missing video/audio stream')
+          if au[0].get('codec_name')!='aac' or str(au[0].get('sample_rate'))!='48000' or int(au[0].get('channels') or 0)!=2: raise SystemExit('unexpected audio output')
+          print(json.dumps({'status':'validated','duration':db,'video_codec':vs[0].get('codec_name'),'audio_codec':au[0].get('codec_name'),'music_track':os.environ['MUSIC_TRACK'],'published':False},ensure_ascii=False))
+          PY
+
+      - name: Upload NO-PUBLISH music test
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediaforge-music-test-${{ github.run_id }}-NO-PUBLISH
+          path: out/music-postprocess/long-form-with-music-NO-PUBLISH.mp4
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
