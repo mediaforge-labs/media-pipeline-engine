@@ -46,7 +46,10 @@ def collect_scene_usage(node: Any, output: list[str]) -> None:
         keys = set(node)
         identity = identity_from_dict(node)
         if identity and len(keys & SCENE_MARKERS) >= 1:
+            # Count the scene record once and stop descending into nested metadata for
+            # that same scene, otherwise the same source can be counted twice falsely.
             output.append(identity)
+            return
         for value in node.values():
             collect_scene_usage(value, output)
     elif isinstance(node, list):
@@ -56,18 +59,34 @@ def collect_scene_usage(node: Any, output: list[str]) -> None:
 
 def validate_selection(selection_path: pathlib.Path) -> dict[str, Any]:
     selection = load(selection_path)
-    selected = int(selection.get('selected_unique_assets') or 0)
+    selected = int(
+        selection.get('downloaded_unique_assets')
+        or selection.get('selected_unique_assets')
+        or 0
+    )
     required = int(selection.get('required_unique_assets') or 0)
-    mapping = selection.get('segment_asset_map') or []
-    ids = [str(row.get('asset_id')) for row in mapping if row.get('asset_id')]
+    all_rows = selection.get('segment_asset_map') or []
+    semantic_rows = [row for row in all_rows if row.get('segment_index') is not None]
+    ids = [str(row.get('asset_id')) for row in semantic_rows if row.get('asset_id')]
+    segments = selection.get('segments') or []
+
     if selection.get('reuse_allowed') is not False:
         raise SystemExit('selection manifest does not enforce reuse_allowed=false')
     if selected < required or required < 1:
         raise SystemExit(f'unique media pool is insufficient: selected={selected}, required={required}')
-    duplicates = [item for item, count in collections.Counter(ids).items() if count > 1]
-    if duplicates:
+    if len(ids) != len(set(ids)):
+        duplicates = [item for item, count in collections.Counter(ids).items() if count > 1]
         raise SystemExit(f'semantic selector reused asset IDs before render: {duplicates[:8]}')
-    return {'selected_unique_assets': selected, 'required_unique_assets': required, 'mapped_segments': len(ids)}
+    if segments and len(ids) != len(segments):
+        raise SystemExit(
+            f'semantic media map is incomplete: mapped={len(ids)}, segments={len(segments)}'
+        )
+
+    return {
+        'selected_unique_assets': selected,
+        'required_unique_assets': required,
+        'mapped_segments': len(ids),
+    }
 
 
 def main() -> None:
@@ -107,8 +126,6 @@ def main() -> None:
     usage: list[str] = []
     collect_scene_usage(media_manifest, usage)
     if not usage:
-        # Do not call a render green if the core did not expose enough information to
-        # prove that the no-reuse invariant was respected.
         raise SystemExit('could not verify per-scene media usage from media/manifest.json')
 
     counts = collections.Counter(usage)
