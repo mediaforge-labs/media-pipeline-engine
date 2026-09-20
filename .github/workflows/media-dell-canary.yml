@@ -134,19 +134,24 @@ jobs:
           import json, pathlib
           p=pathlib.Path('.runtime/dell-assets/mediaforge-selection.json')
           data=json.loads(p.read_text(encoding='utf-8'))
-          selected=int(data.get('selected_unique_assets') or 0)
+          selected=int(data.get('downloaded_unique_assets') or data.get('selected_unique_assets') or 0)
           required=int(data.get('required_unique_assets') or 0)
-          ids=[str(x.get('asset_id')) for x in data.get('segment_asset_map',[]) if x.get('asset_id')]
+          rows=[x for x in data.get('segment_asset_map',[]) if x.get('segment_index') is not None]
+          ids=[str(x.get('asset_id')) for x in rows if x.get('asset_id')]
+          segments=data.get('segments') or []
           if data.get('reuse_allowed') is not False:
               raise SystemExit('media pool does not forbid reuse')
           if selected < required or required < 1:
               raise SystemExit(f'insufficient unique media: selected={selected}, required={required}')
           if len(ids) != len(set(ids)):
               raise SystemExit('duplicate assets detected in semantic media map')
-          print(json.dumps({'status':'media_preflight_ok','selected_unique':selected,'required_unique':required,'mapped_segments':len(ids),'scope':data.get('scope')},ensure_ascii=False))
+          if segments and len(ids) != len(segments):
+              raise SystemExit(f'incomplete semantic mapping: mapped={len(ids)}, segments={len(segments)}')
+          print(json.dumps({'status':'media_preflight_ok','selected_unique':selected,'required_unique':required,'mapped_segments':len(ids),'scope':data.get('scope'),'stale_catalog_assets_skipped':len(data.get('unavailable_catalog_assets') or [])},ensure_ascii=False))
           PY
 
       - name: Render long-form and Shorts
+        id: render
         env:
           MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
           MEDIAFORGE_TTS_PROVIDER: chatterbox
@@ -166,7 +171,7 @@ jobs:
             --output-dir out/dell-canary
 
       - name: Diagnose audio stage on render failure
-        if: failure()
+        if: ${{ failure() && steps.render.outcome == 'failure' }}
         run: |
           set +e
           AUDIO_DIR="out/dell-canary/audio"
