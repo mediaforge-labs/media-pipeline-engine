@@ -2,6 +2,6 @@
   "source_run_id": "35530699529",
   "track": "Digifunk - DivKid.mp3",
   "publish": false,
-  "reason": "validate_music_mix_on_completed_canary_without_rerender",
-  "attempt": 3
+  "reason": "validate_music_at_20_percent_with_loudness_normalization",
+  "attempt": 4
 }
