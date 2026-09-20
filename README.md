@@ -88,16 +88,18 @@ MEDIAFORGE_DATA_KEY_B64
 MEDIAFORGE_CORE_BUNDLE_B64
 ```
 
-The production validation additionally requires:
+The production validation additionally prefers a dedicated Supabase backend key:
 
 ```text
-SUPABASE_SERVICE_ROLE_KEY
+SUPABASE_SECRET_KEY
 ```
+
+A legacy `SUPABASE_SERVICE_ROLE_KEY` is also supported as a fallback, but a dedicated `sb_secret_...` key is preferred because it can be rotated independently.
 
 - `MEDIAFORGE_CORE_KEY_B64` decrypts the proprietary runtime bundle.
 - `MEDIAFORGE_DATA_KEY_B64` encrypts completed lane outputs before artifact upload.
 - `MEDIAFORGE_CORE_BUNDLE_B64` holds the base64 representation of the encrypted runtime bundle.
-- `SUPABASE_SERVICE_ROLE_KEY` is used only inside the production runner to read the approved private voice reference from Supabase Storage.
+- `SUPABASE_SECRET_KEY` is used only inside the production runner to read the approved private voice reference from Supabase Storage.
 
 Never commit the secret values or print them into workflow logs.
 
@@ -127,7 +129,7 @@ To keep even the encrypted binary out of the public repository, base64-encode `c
 
 ## Run the production validation
 
-After the encrypted core secret is updated to the current production-capable bundle and `SUPABASE_SERVICE_ROLE_KEY` is configured:
+After the encrypted core secret is updated to the current production-capable bundle and `SUPABASE_SECRET_KEY` is configured:
 
 1. Open **Actions → Media Production Test**.
 2. Choose `pt-1` first.
