@@ -2,7 +2,7 @@
 """Public MediaForge worker bootstrap.
 
 Decrypts the encrypted proprietary core into a temporary directory and invokes
-its public entrypoint without persisting plaintext core files in the repository.
+its entrypoint without persisting plaintext core files in the repository.
 """
 
 from __future__ import annotations
@@ -55,13 +55,23 @@ def safe_extract_tar_gz(payload: bytes, destination: pathlib.Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", required=True, type=pathlib.Path)
+    parser.add_argument("--job", required=True, type=pathlib.Path)
     parser.add_argument("--lane", required=True)
     parser.add_argument("--locale", required=True)
     parser.add_argument("--output-dir", default="out", type=pathlib.Path)
     args = parser.parse_args()
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    plaintext = decrypt_bundle(args.bundle, load_key())
+    bundle = args.bundle.resolve()
+    job = args.job.resolve()
+    output_dir = args.output_dir.resolve()
+
+    if not bundle.is_file():
+        raise SystemExit(f"Encrypted core bundle not found: {bundle}")
+    if not job.is_file():
+        raise SystemExit(f"Job manifest not found: {job}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plaintext = decrypt_bundle(bundle, load_key())
 
     with tempfile.TemporaryDirectory(prefix="mediaforge-core-") as tmp:
         core_dir = pathlib.Path(tmp)
@@ -74,7 +84,8 @@ def main() -> None:
         env.update({
             "MEDIAFORGE_LANE": args.lane,
             "MEDIAFORGE_LOCALE": args.locale,
-            "MEDIAFORGE_OUTPUT_DIR": str(args.output_dir.resolve()),
+            "MEDIAFORGE_OUTPUT_DIR": str(output_dir),
+            "MEDIAFORGE_JOB_PATH": str(job),
         })
         subprocess.run(["python", str(entrypoint)], check=True, cwd=core_dir, env=env)
 
