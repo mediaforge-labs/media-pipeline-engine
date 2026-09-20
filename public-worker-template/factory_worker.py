@@ -14,7 +14,7 @@ from urllib.parse import quote
 import requests
 
 SUPABASE_BUCKET = "mediaforge-assets"
-RENDER_VERSION = "mediaforge-github-v6"
+RENDER_VERSION = "mediaforge-github-v7"
 
 
 def required(name: str) -> str:
@@ -26,10 +26,11 @@ def required(name: str) -> str:
 
 def api_headers() -> dict[str, str]:
     key = required("SUPABASE_SECRET_KEY")
-    headers = {"apikey": key, "User-Agent": "MediaForge/1.0"}
-    if not key.startswith("sb_secret_"):
-        headers["Authorization"] = f"Bearer {key}"
-    return headers
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "User-Agent": "MediaForge/1.1",
+    }
 
 
 def rest_url(path: str) -> str:
@@ -118,7 +119,6 @@ def storage_upload(local_path: pathlib.Path, storage_path: str) -> str:
     url = f"{required('SUPABASE_URL').rstrip('/')}/storage/v1/object/{SUPABASE_BUCKET}/{encoded}"
     headers = api_headers()
     headers.update({
-        "x-upsert": "true",
         "Content-Type": mimetypes.guess_type(local_path.name)[0] or "application/octet-stream",
         "Cache-Control": "3600",
     })
