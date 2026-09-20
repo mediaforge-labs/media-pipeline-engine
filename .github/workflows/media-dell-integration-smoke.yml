@@ -96,6 +96,7 @@ jobs:
           path: |
             .runtime/dell-smoke/integration-summary.json
             .runtime/dell-smoke/mediaforge-selection.json
+            .runtime/dell-smoke/Catalogo geral.json
           retention-days: 3
           if-no-files-found: error
 
