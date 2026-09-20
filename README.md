@@ -17,6 +17,10 @@ jobs/
   production-test.json
   voice-calibration.json
 
+music/
+  README.md
+  catalog.json
+
 public-worker-template/
   worker.py
   requirements.txt
@@ -44,7 +48,7 @@ SECURITY.md
 5. `public-worker-template/worker.py` decrypts the core only into an ephemeral temporary directory.
 6. The worker passes its lane, locale, output directory, voice-reference path, and job manifest to the private `run.py` entrypoint.
 7. The runtime produces planning data, four logical TTS shards, captions, one horizontal long-form render, and at least five vertical Shorts.
-8. Production mode uses Chatterbox Multilingual V3 voice cloning and approved real media assets.
+8. Production mode uses Chatterbox Multilingual V3 voice cloning, approved real media assets, and an optional dynamic background-music bed.
 9. The public finalizer encrypts the complete lane output before GitHub artifact upload.
 
 ## Human voice profile v4
@@ -61,6 +65,23 @@ The natural-voice profile uses:
 - no artificial tempo acceleration (`tempo = 1.00`)
 - one conditioning profile reused across all chunks
 - one deterministic seed reused across chunks to reduce voice drift
+
+## Dynamic music system
+
+The production runtime now supports a YouTube Audio Library catalog with content-aware selection and multiple tracks per video when that improves pacing.
+
+Default behavior:
+
+- under ~3m30: one track for cohesion
+- ~3m30 to ~7m: up to two tracks
+- ~7m to ~11m: up to three tracks
+- longer videos: up to four tracks
+
+Track changes are aligned to narrative/loop boundaries rather than arbitrary clock intervals. The mixer applies crossfades, narration-triggered sidechain ducking, conservative background gain, artist de-duplication and theme matching (nightlife, driving, crime/tension, tropical/Latin, rural, exploration, action and related moods).
+
+Every render records the selected track title, artist, segment timing and mixing strategy in the output manifest. Voice-calibration jobs explicitly disable music.
+
+The public `music/catalog.json` contains metadata only; MP3 binaries stay out of public Git and are served from private project storage through the encrypted runtime.
 
 ## Smoke pipeline
 
@@ -106,12 +127,13 @@ Never commit the secret values or print them into workflow logs.
 
 ## Run the production calibration
 
-1. Update `MEDIAFORGE_CORE_BUNDLE_B64` with the current v4 core.
-2. Create/update `MEDIAFORGE_VOICE_REFERENCE_B64` with the current v4 voice reference.
-3. Open **Actions → Media Production Test**.
-4. Choose `pt-1`.
-5. Keep `jobs/voice-calibration.json` as the manifest.
-6. Run the workflow and listen to the resulting narration before approving any full production render.
+1. Keep the currently configured voice-calibration core and human voice reference.
+2. Open **Actions → Media Production Test**.
+3. Choose `pt-1`.
+4. Keep `jobs/voice-calibration.json` as the manifest.
+5. Run the workflow and listen to the resulting narration before approving any full production render.
+
+The music-enabled production core is packaged separately and should only replace the calibration core after the PT-BR voice is approved and the private music library is uploaded.
 
 ## Security boundary
 
