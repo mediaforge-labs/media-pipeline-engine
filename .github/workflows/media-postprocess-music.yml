@@ -47,6 +47,7 @@ jobs:
               f.write(f'MUSIC_TRACK={track}\n')
           print('source_run_id=',run)
           print('track=',track)
+          print('music_target=20% of normalized narration, with speech ducking')
           PY
 
       - name: Install FFmpeg tools
@@ -95,14 +96,14 @@ jobs:
           PY
           ffprobe -v error -show_entries format=duration:stream=codec_name,sample_rate,channels -of json .runtime/music.mp3
 
-      - name: Mix narration and music without re-rendering video
+      - name: Mix narration and music at 20 percent without re-rendering video
         run: |
           set -euo pipefail
           mkdir -p out/music-postprocess
           ffmpeg -hide_banner -y \
             -i "$SOURCE_VIDEO" \
             -stream_loop -1 -i .runtime/music.mp3 \
-            -filter_complex "[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[nsc][nmix];[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=0.075[m];[m][nsc]sidechaincompress=threshold=0.025:ratio=8:attack=18:release=320[ducked];[nmix][ducked]amix=inputs=2:duration=first:weights='1 1':normalize=0,alimiter=limit=0.96[out]" \
+            -filter_complex "[0:a]aresample=48000,aformat=channel_layouts=stereo,loudnorm=I=-16:TP=-1.5:LRA=11,asplit=2[nsc][nmix];[1:a]aresample=48000,aformat=channel_layouts=stereo,loudnorm=I=-16:TP=-1.5:LRA=11,volume=0.20[m];[m][nsc]sidechaincompress=threshold=0.020:ratio=10:attack=15:release=350[ducked];[nmix][ducked]amix=inputs=2:duration=first:weights='1 1':normalize=0,alimiter=limit=0.95[out]" \
             -map 0:v:0 -map "[out]" \
             -c:v copy -c:a aac -b:a 192k -ar 48000 -ac 2 \
             -shortest -movflags +faststart \
@@ -123,7 +124,7 @@ jobs:
           vs=[x for x in b['streams'] if x.get('codec_type')=='video']; au=[x for x in b['streams'] if x.get('codec_type')=='audio']
           if not vs or not au: raise SystemExit('missing video/audio stream')
           if au[0].get('codec_name')!='aac' or str(au[0].get('sample_rate'))!='48000' or int(au[0].get('channels') or 0)!=2: raise SystemExit('unexpected audio output')
-          print(json.dumps({'status':'validated','duration':db,'video_codec':vs[0].get('codec_name'),'audio_codec':au[0].get('codec_name'),'music_track':os.environ['MUSIC_TRACK'],'published':False},ensure_ascii=False))
+          print(json.dumps({'status':'validated','duration':db,'video_codec':vs[0].get('codec_name'),'audio_codec':au[0].get('codec_name'),'music_track':os.environ['MUSIC_TRACK'],'music_level':0.20,'loudness_reference_lufs':-16,'speech_ducking':True,'published':False},ensure_ascii=False))
           PY
 
       - name: Upload NO-PUBLISH music test
