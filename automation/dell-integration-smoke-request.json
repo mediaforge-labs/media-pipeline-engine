@@ -1,5 +1,5 @@
 {
-  "reason": "validate_refreshed_gta_vi_collection_documents",
+  "reason": "capture_gateway_catalog_schema_before_refresh",
   "publish": false,
-  "requested_at": "2026-09-20"
+  "requested_at": "2026-09-20T22:52:00Z"
 }
