@@ -103,10 +103,15 @@ jobs:
 
       - name: Fetch only selected Dell assets
         env:
-          SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_S3_ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY_ID }}
+          SUPABASE_S3_SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET_ACCESS_KEY }}
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          AWS_EC2_METADATA_DISABLED: 'true'
         run: |
           set -euo pipefail
+          test -n "$SUPABASE_S3_ACCESS_KEY_ID"
+          test -n "$SUPABASE_S3_SECRET_ACCESS_KEY"
           TITLE="$(python -c "import json;print(json.load(open('.runtime/dell-canary-job.json'))['jobs']['pt-1']['title'])")"
           python public-worker-template/dell_asset_client.py \
             --title "$TITLE" \
@@ -134,11 +139,10 @@ jobs:
       - name: Validate complete canary
         run: |
           python - <<'PY'
-          import json, pathlib, sys
+          import json, pathlib
           root=pathlib.Path('out/dell-canary')
           m=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
           metrics=m.get('metrics') or {}
-          library=(m.get('media') or {}).get('video_library') or m.get('video_library') or {}
           shorts=list((root/'shorts').glob('short-*.mp4'))
           longform=root/'video'/'long-form.mp4'
           if not longform.is_file() or longform.stat().st_size < 100000:
