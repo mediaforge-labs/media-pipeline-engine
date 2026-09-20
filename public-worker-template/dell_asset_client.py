@@ -9,6 +9,8 @@ import os
 import pathlib
 import re
 import shutil
+import time
+import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -38,7 +40,7 @@ def control(action: str, body: dict | None = None):
     base = os.environ['SUPABASE_URL'].rstrip('/')
     key = os.environ['SUPABASE_SECRET_KEY']
     url = f'{base}/functions/v1/mediaforge-dell-control'
-    headers = {'apikey': key, 'Content-Type': 'application/json', 'User-Agent': 'MediaForge-GitHub/4.2'}
+    headers = {'apikey': key, 'Content-Type': 'application/json', 'User-Agent': 'MediaForge-GitHub/4.3'}
     if body is None:
         response = requests.get(url, headers=headers, params={'action': action}, timeout=60)
     else:
@@ -148,7 +150,9 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
             f'budget is {byte_budget / 1024 / 1024 / 1024:.3f} GiB.'
         )
 
-    target_pool = min(len(assets), max_assets, max(required_unique + 16, 64))
+    # A small alternatives buffer is enough. Keeping this bounded leaves disk for TTS,
+    # the long-form render and Shorts instead of filling the runner with unused source files.
+    target_pool = min(len(assets), max_assets, required_unique + 8)
     used: set[str] = set()
     chosen: list[dict] = []
     selection_rows: list[dict] = []
@@ -182,7 +186,7 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
                 feasible.append(item)
         return feasible
 
-    # Map every real narration segment to one distinct GTA VI clip first.
+    # One distinct source for every real narration segment.
     for segment_index, segment in enumerate(segments):
         remaining_required_after_pick = max(0, required_unique - len(chosen) - 1)
         candidates = candidates_that_preserve_capacity(remaining_required_after_pick)
@@ -204,21 +208,14 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
         chosen.append(enriched)
         selection_rows.append({'segment_index': segment_index, 'asset_id': aid, 'segment': segment, 'role': 'semantic-scene'})
 
-    # IMPORTANT: required_unique can be slightly larger than len(segments) because the
-    # duration-based safety estimate is conservative. The previous v4.1 selector aborted
-    # here at 109/112 before it had a chance to add the three reserve clips. Complete the
-    # mandatory unique set now, still preserving byte capacity and never reusing a source.
+    # Duration-based estimate can be a few clips larger than the semantic segmentation.
     whole_query = title + '\n' + script
     while len(chosen) < required_unique:
         remaining_required_after_pick = required_unique - len(chosen) - 1
         candidates = candidates_that_preserve_capacity(remaining_required_after_pick)
         if not candidates:
             break
-        # For reserve clips, prefer relevance but give size a stronger tie-break so the
-        # safety reserve does not consume unnecessary runner disk.
-        def reserve_rank(item: dict):
-            return (score(item, whole_query), -asset_size(item))
-        item = max(candidates, key=reserve_rank)
+        item = max(candidates, key=lambda candidate: (score(candidate, whole_query), -asset_size(candidate)))
         aid = str(item['asset_id'])
         used.add(aid)
         total_bytes += asset_size(item)
@@ -235,8 +232,6 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
             f'No reuse was allowed and the remaining candidates could not fit the runner budget.'
         )
 
-    # Optional buffer for scene-planner alternatives. This buffer is best-effort; the
-    # mandatory no-reuse capacity above has already been proven and selected.
     remaining = unused_assets()
     remaining.sort(key=lambda item: (score(item, whole_query), -asset_size(item)), reverse=True)
     for item in remaining:
@@ -260,6 +255,70 @@ def choose_unique_pool(title: str, script: str, assets: list[dict], max_assets: 
     return chosen, selection_rows, segments, required_unique, total_bytes
 
 
+def download_asset(status: dict, request_id: str, token: str, item: dict, out: pathlib.Path) -> tuple[bool, str, dict]:
+    """Download one asset with transient retries and clean partial files.
+
+    404/410 means the Dell catalog contains a stale entry. Those are returned to the
+    caller so another unique GTA VI clip can replace it instead of killing the whole run.
+    """
+    current_status = status
+    last_error = 'unknown'
+    transient_codes = {408, 429, 500, 502, 503, 504}
+
+    for attempt in range(1, 4):
+        part = out.with_suffix(out.suffix + '.part')
+        part.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+        try:
+            public_url = str(current_status.get('public_url') or '').rstrip('/')
+            if not public_url:
+                raise RuntimeError('Dell asset gateway public_url is empty')
+            url = f"{public_url}/asset/{request_id}/{item['asset_id']}"
+            request = urllib.request.Request(
+                url,
+                headers={'X-MediaForge-Request-Token': token, 'User-Agent': 'MediaForge-GitHub/4.3'},
+            )
+            with urllib.request.urlopen(request, timeout=1800) as source, part.open('wb') as target:
+                while True:
+                    chunk = source.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    target.write(chunk)
+
+            expected = asset_size(item)
+            actual = part.stat().st_size
+            if expected > 0 and actual != expected:
+                raise RuntimeError(f'size mismatch: expected={expected} actual={actual}')
+            if actual <= 0:
+                raise RuntimeError('downloaded file is empty')
+            part.replace(out)
+            return True, 'ok', current_status
+
+        except urllib.error.HTTPError as exc:
+            last_error = f'HTTP {exc.code}'
+            part.unlink(missing_ok=True)
+            if exc.code in {404, 410}:
+                return False, last_error, current_status
+            if exc.code not in transient_codes:
+                return False, last_error, current_status
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, RuntimeError) as exc:
+            last_error = f'{type(exc).__name__}: {exc}'
+            part.unlink(missing_ok=True)
+
+        if attempt < 3:
+            # Refresh the tunnel URL/heartbeat before retrying in case the Dell gateway
+            # rotated while this GitHub job was running.
+            try:
+                refreshed = control('status')
+                if refreshed.get('status') == 'online' and refreshed.get('public_url'):
+                    current_status = refreshed
+            except Exception:
+                pass
+            time.sleep(2 * attempt)
+
+    return False, last_error, current_status
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--title', required=True)
@@ -280,21 +339,29 @@ def main():
     if datetime.now(timezone.utc) - beat > timedelta(minutes=2):
         raise SystemExit('Dell asset gateway heartbeat is stale')
 
+    # The Dell gateway is the owner-curated GTA VI library. External/random media is not
+    # eligible. Every downloaded source is used at most once by the renderer.
     assets = [item for item in catalog.get('assets', []) if item.get('approved', True)]
     chosen, selection_rows, segments, required_unique, selected_bytes = choose_unique_pool(
         args.title, script, assets, args.max_assets, args.max_total_bytes
     )
 
+    chosen_ids = {str(item['asset_id']) for item in chosen}
+    fallback_pool = [item for item in assets if str(item.get('asset_id')) not in chosen_ids]
+
     request_id = uuid.uuid4().hex
     token = uuid.uuid4().hex + uuid.uuid4().hex
-    expires = (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat()
+    # 4 hours avoids expiring a request during a slow transfer/render-preparation cycle.
+    expires = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+    # Authorize the curated catalog for this short-lived request so a stale/missing primary
+    # can be replaced immediately without rebuilding the gateway request.
     control(
         'create_request',
         {
             'request_id': request_id,
             'request_token': token,
             'job_key': args.job_key,
-            'asset_ids': [item['asset_id'] for item in chosen],
+            'asset_ids': [item['asset_id'] for item in assets],
             'expires_at': expires,
         },
     )
@@ -302,29 +369,143 @@ def main():
     dest = pathlib.Path(args.dest)
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
+
     local: list[dict] = []
+    downloaded_ids: set[str] = set()
+    unavailable_ids: set[str] = set()
+    downloaded_bytes = 0
+    current_status = status
+    whole_query = args.title + '\n' + script
+
+    def update_selection_for_replacement(original: dict, replacement: dict, reason: str) -> None:
+        old_id = str(original['asset_id'])
+        new_id = str(replacement['asset_id'])
+        for row in selection_rows:
+            if str(row.get('asset_id')) == old_id:
+                row['asset_id'] = new_id
+                row['replaced_from'] = old_id
+                row['replacement_reason'] = reason
+
+    def replacement_for(original: dict) -> dict | None:
+        nonlocal downloaded_bytes
+        query = args.title + '\n' + str(original.get('mediaforge_segment_text') or '')
+        if not str(original.get('mediaforge_segment_text') or '').strip():
+            query = whole_query
+        candidates = [
+            item for item in fallback_pool
+            if str(item.get('asset_id')) not in downloaded_ids
+            and str(item.get('asset_id')) not in unavailable_ids
+            and downloaded_bytes + asset_size(item) <= args.max_total_bytes
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda candidate: (score(candidate, query), -asset_size(candidate)))
+
     try:
-        for index, item in enumerate(chosen, 1):
-            suffix = pathlib.Path(item['file_name']).suffix or '.mp4'
-            out = dest / f'{index:03d}-{item["asset_id"]}{suffix}'
-            url = f"{status['public_url'].rstrip('/')}/asset/{request_id}/{item['asset_id']}"
-            request = urllib.request.Request(
-                url,
-                headers={'X-MediaForge-Request-Token': token, 'User-Agent': 'MediaForge-GitHub/4.2'},
-            )
-            with urllib.request.urlopen(request, timeout=1800) as source, out.open('wb') as target:
-                while True:
-                    chunk = source.read(8 * 1024 * 1024)
-                    if not chunk:
+        planned = list(chosen)
+        for index, original in enumerate(planned, 1):
+            # If an asset was already consumed as a replacement, never download/reuse it again.
+            if str(original['asset_id']) in downloaded_ids:
+                continue
+
+            item = original
+            replacement_hops = 0
+            while True:
+                aid = str(item['asset_id'])
+                suffix = pathlib.Path(str(item.get('file_name') or '')).suffix or '.mp4'
+                out = dest / f'{len(local) + 1:03d}-{aid}{suffix}'
+                ok, reason, current_status = download_asset(current_status, request_id, token, item, out)
+                if ok:
+                    actual = out.stat().st_size
+                    if downloaded_bytes + actual > args.max_total_bytes:
+                        out.unlink(missing_ok=True)
+                        ok = False
+                        reason = 'runner byte budget exceeded after download'
+                    else:
+                        downloaded_ids.add(aid)
+                        downloaded_bytes += actual
+                        enriched = dict(item)
+                        enriched['local_name'] = out.name
+                        enriched['mediaforge_max_uses'] = 1
+                        enriched['mediaforge_gta_vi_only'] = True
+                        local.append(enriched)
+                        print(json.dumps({
+                            'downloaded': len(local),
+                            'planned': len(planned),
+                            'asset_id': aid,
+                            'bytes': actual,
+                            'replacement': aid != str(original['asset_id']),
+                        }))
                         break
-                    target.write(chunk)
-            if out.stat().st_size != int(item['size_bytes']):
-                raise RuntimeError(f'Size mismatch {item["asset_id"]}')
-            local.append({**item, 'local_name': out.name})
-            print(json.dumps({'downloaded': index, 'of': len(chosen), 'asset_id': item['asset_id'], 'bytes': out.stat().st_size}))
+
+                unavailable_ids.add(aid)
+                print(json.dumps({
+                    'asset_unavailable': aid,
+                    'reason': reason,
+                    'replacement_required': True,
+                }))
+                replacement = replacement_for(original)
+                if replacement is None:
+                    mandatory = bool(original.get('mediaforge_segment_index') is not None or original.get('mediaforge_reserve_asset'))
+                    if mandatory or len(local) < required_unique:
+                        raise SystemExit(
+                            f'Unable to replace unavailable GTA VI asset {original["asset_id"]}; '
+                            f'{len(local)}/{required_unique} required unique clips are locally verified.'
+                        )
+                    print(json.dumps({'optional_buffer_skipped': original['asset_id'], 'reason': reason}))
+                    break
+
+                replacement_hops += 1
+                if replacement_hops > 12:
+                    raise SystemExit(f'Too many unavailable replacement assets while replacing {original["asset_id"]}')
+
+                replacement = dict(replacement)
+                # Preserve the semantic assignment/role of the missing source.
+                for key in (
+                    'mediaforge_segment_index', 'mediaforge_segment_text', 'mediaforge_selection_score',
+                    'mediaforge_reserve_asset', 'mediaforge_buffer_asset',
+                ):
+                    if key in original:
+                        replacement[key] = original[key]
+                replacement['mediaforge_max_uses'] = 1
+                replacement['mediaforge_gta_vi_only'] = True
+                replacement['mediaforge_replaced_asset_id'] = str(original['asset_id'])
+                replacement['mediaforge_replacement_reason'] = reason
+                update_selection_for_replacement(original, replacement, reason)
+                item = replacement
+
+        if len(local) < required_unique:
+            raise SystemExit(
+                f'Only {len(local)} locally verified unique GTA VI clips were downloaded; '
+                f'{required_unique} are required. TTS/render will not start.'
+            )
+        if len(downloaded_ids) != len(local):
+            raise SystemExit('Internal media download error: duplicate local asset IDs detected')
+        if downloaded_bytes > args.max_total_bytes:
+            raise SystemExit('Downloaded media exceeded the configured runner byte budget')
+
+        # Every semantic segment must still point at a source that really exists locally,
+        # including segments whose original catalog asset was replaced after a 404/410.
+        local_ids = {str(item['asset_id']) for item in local}
+        missing_segments = [
+            row for row in selection_rows
+            if row.get('segment_index') is not None and str(row.get('asset_id')) not in local_ids
+        ]
+        if missing_segments:
+            raise SystemExit(
+                f'{len(missing_segments)} narration segments have no locally verified GTA VI clip after fallback replacement.'
+            )
 
         (dest / 'Catalogo geral.json').write_text(
-            json.dumps({'scope': 'gta-vi-owner-curated-only','reuse_policy': 'never-reuse-source-file','assets': local}, ensure_ascii=False, indent=2),
+            json.dumps(
+                {
+                    'scope': 'gta-vi-owner-curated-only',
+                    'reuse_policy': 'never-reuse-source-file',
+                    'assets': local,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding='utf-8',
         )
         (dest / 'mediaforge-selection.json').write_text(
@@ -334,8 +515,10 @@ def main():
                     'segments': segments,
                     'segment_asset_map': selection_rows,
                     'required_unique_assets': required_unique,
-                    'selected_unique_assets': len(chosen),
-                    'selected_bytes': selected_bytes,
+                    'planned_unique_assets': len(chosen),
+                    'downloaded_unique_assets': len(local),
+                    'downloaded_bytes': downloaded_bytes,
+                    'unavailable_catalog_assets': sorted(unavailable_ids),
                     'reuse_allowed': False,
                 },
                 ensure_ascii=False,
@@ -349,7 +532,19 @@ def main():
         except Exception:
             pass
 
-    print(json.dumps({'status':'ready','root':str(dest.resolve()),'selected':len(chosen),'required_unique':required_unique,'segments':len(segments),'selected_gb':round(selected_bytes/1024/1024/1024,3),'reuse_allowed':False,'scope':'gta-vi-owner-curated-only','request_id':request_id}, ensure_ascii=False))
+    print(json.dumps({
+        'status': 'ready',
+        'root': str(dest.resolve()),
+        'planned': len(chosen),
+        'downloaded_unique': len(local),
+        'required_unique': required_unique,
+        'segments': len(segments),
+        'downloaded_gb': round(downloaded_bytes / 1024 / 1024 / 1024, 3),
+        'catalog_assets_skipped': len(unavailable_ids),
+        'reuse_allowed': False,
+        'scope': 'gta-vi-owner-curated-only',
+        'request_id': request_id,
+    }, ensure_ascii=False))
 
 
 if __name__ == '__main__':
