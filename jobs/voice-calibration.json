@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "mode": "production",
+  "jobs": {
+    "pt-1": {
+      "id": "voice-calibration-pt-v3",
+      "locale": "pt-BR",
+      "title": "Calibração de voz PT-BR — perfil humano v3",
+      "shorts_requested": 5,
+      "script": "Em GTA 6, o gameplay mostra detalhes que a Rockstar Games colocou diretamente no mundo de Vice City. Um minigame pode parecer simples, mas muda completamente a experiência de quem joga. E quando falamos de crossplay entre PlayStation e Xbox, é importante separar o que está confirmado do que ainda é rumor. Jason também aparece no Extended Look com elementos de HUD durante algumas atividades. GTA precisa soar natural, rápido e contínuo, sem pausas artificiais entre as letras.",
+      "media": [
+        {
+          "url": "https://www.rockstargames.com/VI/_next/static/media/Vice_City_10.0f1q-xa_4q8r2.jpg?akim=1&imdensity=1&imwidth=3840",
+          "source": "Rockstar Games",
+          "safety": "official"
+        }
+      ]
+    }
+  }
+}
