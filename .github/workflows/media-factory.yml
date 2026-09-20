@@ -28,21 +28,22 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$SUPABASE_SECRET_KEY"
+          NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           RESPONSE="$(curl --fail --silent --show-error --get \
             "$SUPABASE_URL/rest/v1/youtube_factory_jobs" \
             -H "apikey: $SUPABASE_SECRET_KEY" \
             -H "Authorization: Bearer $SUPABASE_SECRET_KEY" \
-            --data-urlencode 'select=id' \
-            --data-urlencode 'status=eq.pending' \
+            --data-urlencode 'select=id,status,lease_expires_at' \
             --data-urlencode 'preferred_backend=eq.github' \
             --data-urlencode 'stage=in.(mediaforge,production,render)' \
+            --data-urlencode "or=(status.eq.pending,and(status.eq.running,lease_expires_at.lt.$NOW_UTC))" \
             --data-urlencode 'limit=1')"
           if [ "$RESPONSE" = '[]' ]; then
             echo 'has_work=false' >> "$GITHUB_OUTPUT"
-            echo 'No pending GitHub MediaForge jobs.'
+            echo 'No pending or recoverable GitHub MediaForge jobs.'
           else
             echo 'has_work=true' >> "$GITHUB_OUTPUT"
-            echo 'Pending MediaForge work detected.'
+            echo 'Pending/recoverable MediaForge work detected.'
           fi
 
   factory:
