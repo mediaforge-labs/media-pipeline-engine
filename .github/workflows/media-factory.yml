@@ -84,11 +84,15 @@ jobs:
         env:
           SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_S3_ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY_ID }}
+          SUPABASE_S3_SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET_ACCESS_KEY }}
           MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
           MEDIAFORGE_TTS_PROVIDER: chatterbox
         run: |
           set -euo pipefail
           test -n "$SUPABASE_SECRET_KEY" || { echo "SUPABASE_SECRET_KEY is not configured"; exit 1; }
+          test -n "$SUPABASE_S3_ACCESS_KEY_ID" || { echo "SUPABASE_S3_ACCESS_KEY_ID is not configured"; exit 1; }
+          test -n "$SUPABASE_S3_SECRET_ACCESS_KEY" || { echo "SUPABASE_S3_SECRET_ACCESS_KEY is not configured"; exit 1; }
           python public-worker-template/factory_worker.py \
             --lane "${{ matrix.lane }}" \
             --locale "${{ matrix.locale }}" \
