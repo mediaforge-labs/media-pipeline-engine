@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "mode": "production",
+  "jobs": {
+    "pt-1": {
+      "id": "production-test-pt-1",
+      "locale": "pt-BR",
+      "title": "Teste de produção MediaForge — esportes em GTA VI",
+      "shorts_requested": 5,
+      "script": "Jason aparece diante de uma cesta de basquete com comandos de mira e arremesso visíveis na tela. Isso transforma a cena em evidência de uma atividade realmente jogável em GTA 6, e não apenas decoração. A academia segue a mesma lógica: Lucia aparece fazendo supino com interface própria, enquanto Jason também já foi mostrado treinando. Corridas de circuito, encontros de carros, motocross e atividades aquáticas ampliam ainda mais a lista. O ponto mais interessante é separar o que a Rockstar mostrou como mecânica do que ainda é apenas cenário. Neste teste de produção, a narração real e as imagens oficiais serão montadas pelo MediaForge para validar a primeira versão visual do pipeline.",
+      "media": [
+        {
+          "url": "https://www.rockstargames.com/VI/_next/static/media/Vice_City_10.0f1q-xa_4q8r2.jpg?akim=1&imdensity=1&imwidth=3840",
+          "source": "Rockstar Games",
+          "safety": "official"
+        },
+        {
+          "url": "https://www.rockstargames.com/VI/_next/static/media/an-extended-look.0ijbsha5fo1te.jpg",
+          "source": "Rockstar Games",
+          "safety": "official"
+        },
+        {
+          "url": "https://www.rockstargames.com/VI/_next/static/media/Ambrosia_01.0rqphs0gazkm..jpg?akim=1&imdensity=1&imwidth=3840",
+          "source": "Rockstar Games",
+          "safety": "official"
+        },
+        {
+          "url": "https://www.rockstargames.com/VI/_next/static/media/Brian_Heder_landscape.0a-egj5b8yo1q.jpg?akim=1&imdensity=1&imwidth=3840",
+          "source": "Rockstar Games",
+          "safety": "official"
+        }
+      ]
+    },
+    "en-1": {
+      "id": "production-test-en-1",
+      "locale": "en-US",
+      "title": "MediaForge production test — sports in GTA VI",
+      "shorts_requested": 5,
+      "script": "Jason appears in front of a basketball hoop with aiming and shooting controls visible on screen. That turns the scene into evidence of a real playable activity in GTA 6, not simple decoration. The gym follows the same pattern: Lucia is shown bench pressing with a dedicated interface, while Jason has also been shown training. Circuit racing, car meets, motocross and water activities expand the list even further. The important part is separating mechanics Rockstar has actually shown from details that are still only part of the environment. In this production test, MediaForge will combine real narration with official imagery to validate the first visual production version of the pipeline.",
+      "media": [
+        {
+          "url": "https://www.rockstargames.com/VI/_next/static/media/Vice_City_10.0f1q-xa_4q8r2.jpg?akim=1&imdensity=1&imwidth=3840",
+          "source": "Rockstar Games",
+          "safety": "official"
+        },
+        {
+          "url": "https://www.rockstargames.com/VI/_next/static/media/an-extended-look.0ijbsha5fo1te.jpg",
+          "source": "Rockstar Games",
+          "safety": "official"
+        },
+        {
+          "url": "https://www.rockstargames.com/VI/_next/static/media/Ambrosia_01.0rqphs0gazkm..jpg?akim=1&imdensity=1&imwidth=3840",
+          "source": "Rockstar Games",
+          "safety": "official"
+        },
+        {
+          "url": "https://www.rockstargames.com/VI/_next/static/media/Brian_Heder_landscape.0a-egj5b8yo1q.jpg?akim=1&imdensity=1&imwidth=3840",
+          "source": "Rockstar Games",
+          "safety": "official"
+        }
+      ]
+    }
+  }
+}
