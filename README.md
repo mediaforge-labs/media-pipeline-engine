@@ -1,113 +1,137 @@
 # Media Pipeline Engine
 
-Public orchestration and encrypted-runtime layer for the MediaForge video production pipeline.
+GitHub-hosted audiovisual factory for Leonidanos. Editorial decisions stay in `lovacademy/portal-leonidanos`; MediaForge consumes production jobs through Supabase and returns finished long-form videos, narration, captions and Shorts.
 
-## Current architecture
-
-The repository contains a validated four-lane PT/EN smoke pipeline plus a separate single-lane production validation workflow. Proprietary runtime source remains outside the public Git tree.
+## Production architecture
 
 ```text
-.github/workflows/
-  media-pipeline.yml
-  media-production-test.yml
-
-jobs/
-  README.md
-  smoke-batch.json
-  production-test.json
-  voice-calibration.json
-
-music/
-  README.md
-  catalog.json
-
-public-worker-template/
-  worker.py
-  requirements.txt
-  requirements-production.txt
-
-private-worker-packaging/
-  build_core_bundle.py
-  README.md
-
-private-worker-core/
-  README.md
-  public_finalize.py
-
-.gitignore
-LICENSE.md
-SECURITY.md
+portal-leonidanos
+  editorial / PT+EN metadata / thumbnail / schedule
+            |
+            v
+Supabase youtube_video_variants + youtube_factory_jobs
+            |
+            v
+mediaforge-labs/media-pipeline-engine
+  4 GitHub-hosted lanes
+  Chatterbox Multilingual V3
+  approved B-roll library
+  dynamic YouTube Audio Library music
+  captions / long-form / 5+ Shorts / QA
+            |
+            v
+Supabase mediaforge-assets
+            |
+            v
+portal-leonidanos
+  YouTube upload / scheduling / publication state
 ```
 
-## Pipeline model
+The Dell workstation is not a production compute backend. It is used only for the one-time synchronization of the owner-curated video library in `C:\LeonidanosVideoPipeline` into private object storage.
 
-1. Proprietary core source stays outside this public repository.
-2. `private-worker-packaging/build_core_bundle.py` creates an AES-256-GCM encrypted runtime bundle.
-3. The workflow loads that encrypted bundle from `MEDIAFORGE_CORE_BUNDLE_B64`.
-4. The canonical human voice reference is stored separately in `MEDIAFORGE_VOICE_REFERENCE_B64` so neither secret exceeds GitHub's size limit.
-5. `public-worker-template/worker.py` decrypts the core only into an ephemeral temporary directory.
-6. The worker passes its lane, locale, output directory, voice-reference path, and job manifest to the private `run.py` entrypoint.
-7. The runtime produces planning data, four logical TTS shards, captions, one horizontal long-form render, and at least five vertical Shorts.
-8. Production mode uses Chatterbox Multilingual V3 voice cloning, approved real media assets, and an optional dynamic background-music bed.
-9. The public finalizer encrypts the complete lane output before GitHub artifact upload.
+## GitHub-hosted factory
 
-## Human voice profile v4
-
-The canonical Leonidanos human voice reference is no longer packed inside the encrypted core. It is materialized only inside the GitHub runner from `MEDIAFORGE_VOICE_REFERENCE_B64`, converted to 24 kHz mono WAV, used for Chatterbox conditioning, and discarded with the runner.
-
-Portuguese production uses the `pt-br-human-v3` pronunciation profile. TTS-only spoken forms are applied to recurring terms such as `GTA`, `gameplay`, `minigame`, `Rockstar Games`, `crossplay`, `PlayStation`, `Xbox`, `Vice City`, `Jason`, `Extended Look` and `HUD`. Captions and visible copy keep their original spelling.
-
-The natural-voice profile uses:
-
-- `temperature = 0.80`
-- `exaggeration = 0.50`
-- `cfg_weight = 0.35` for `pt-BR`
-- no artificial tempo acceleration (`tempo = 1.00`)
-- one conditioning profile reused across all chunks
-- one deterministic seed reused across chunks to reduce voice drift
-
-## Dynamic music system
-
-The production runtime now supports a YouTube Audio Library catalog with content-aware selection and multiple tracks per video when that improves pacing.
-
-Default behavior:
-
-- under ~3m30: one track for cohesion
-- ~3m30 to ~7m: up to two tracks
-- ~7m to ~11m: up to three tracks
-- longer videos: up to four tracks
-
-Track changes are aligned to narrative/loop boundaries rather than arbitrary clock intervals. The mixer applies crossfades, narration-triggered sidechain ducking, conservative background gain, artist de-duplication and theme matching (nightlife, driving, crime/tension, tropical/Latin, rural, exploration, action and related moods).
-
-Every render records the selected track title, artist, segment timing and mixing strategy in the output manifest. Voice-calibration jobs explicitly disable music.
-
-The public `music/catalog.json` contains metadata only; MP3 binaries stay out of public Git and are served from private project storage through the encrypted runtime.
-
-## Smoke pipeline
-
-`jobs/smoke-batch.json` contains four deterministic integration jobs:
+`.github/workflows/media-factory.yml` runs four independent lanes on GitHub-hosted Ubuntu runners:
 
 - `pt-1` — `pt-BR`
 - `pt-2` — `pt-BR`
 - `en-1` — `en-US`
 - `en-2` — `en-US`
 
-The smoke workflow exercises the complete orchestration path without consuming production TTS.
+The workflow can be started manually and also checks for work every 15 minutes. Each lane atomically leases one pending Supabase job, so the same variant cannot be processed by two runners at once.
 
-## Production voice calibration
+`public-worker-template/factory_worker.py`:
 
-Before another full production render, `Media Production Test` defaults to `jobs/voice-calibration.json`. The PT-BR calibration intentionally tests terms that previously caused poor pronunciation, including `GTA`, `gameplay`, `minigame`, `Rockstar Games`, `crossplay`, `PlayStation`, `Xbox`, `Vice City`, `Jason`, `Extended Look` and `HUD`.
+1. leases a `youtube_factory_jobs` row;
+2. loads the associated `youtube_queue` and `youtube_video_variants` row;
+3. creates the private runtime manifest using the variant `tts_text`/script;
+4. invokes the encrypted MediaForge core;
+5. uploads the long-form video, narration, captions, manifest and Shorts into the private `mediaforge-assets` bucket;
+6. updates the variant and factory-job status in Supabase.
 
-The production workflow:
+## Encrypted runtime
 
-1. Installs Chatterbox and FFmpeg.
-2. Restores/caches Chatterbox model files.
-3. Materializes the encrypted production core.
-4. Materializes the canonical human voice reference from its separate secret.
-5. Converts the reference to 24 kHz mono WAV.
-6. Runs Chatterbox Multilingual V3 using the human voice profile and pronunciation rules.
-7. Renders the test output and validates the TTS profile.
-8. Encrypts the result before artifact upload.
+The proprietary runtime source is not stored in plaintext in this public repository.
+
+1. `private-worker-packaging/build_core_bundle.py` creates an AES-256-GCM encrypted runtime bundle.
+2. `MEDIAFORGE_CORE_BUNDLE_B64` stores that encrypted bundle.
+3. `MEDIAFORGE_CORE_KEY_B64` is the separate decryption key.
+4. `public-worker-template/worker.py` decrypts the runtime only into an ephemeral runner directory.
+5. Final test artifacts can also be encrypted with `MEDIAFORGE_DATA_KEY_B64`.
+
+## Human voice
+
+The canonical human voice reference is stored separately in `MEDIAFORGE_VOICE_REFERENCE_B64`, materialized only inside the GitHub runner and discarded with the runner.
+
+Production is pinned to a Chatterbox source revision containing explicit **Multilingual V3** support. The PT-BR natural-voice profile uses:
+
+- `temperature = 0.80`
+- `exaggeration = 0.50`
+- `cfg_weight = 0.35`
+- `tempo = 1.00`
+- one reusable voice-conditioning profile across chunks
+- deterministic seed reuse to reduce speaker drift
+- `pt-br-human-v3` pronunciation preprocessing only for TTS text
+
+Visible copy and captions retain normal spelling. The pronunciation layer handles recurring terms such as `GTA`, `gameplay`, `minigame`, `Rockstar Games`, `crossplay`, `PlayStation`, `Xbox`, `Vice City`, `Jason`, `Extended Look` and `HUD`.
+
+## Approved video library
+
+All video files curated by the project owner under `C:\LeonidanosVideoPipeline` are treated as approved assets for this factory.
+
+`tools/sync_video_library.py` performs a **one-time upload only**; it does not render on the Dell. It scans videos plus the three editorial indexes:
+
+- `Repositorio GTA`
+- `Catálogo geral`
+- `Transcrição Visual GTA VI`
+
+The synchronizer extracts index context, probes video duration, uploads binaries to `mediaforge-assets/video-library/videos/`, uploads the index documents, and writes `mediaforge-assets/video-library/catalog.json`.
+
+During production the encrypted runtime searches this catalog against the current title/script, downloads only the selected clips and uses them as B-roll. It does not download the whole library on every run.
+
+## Dynamic music
+
+Thirty owner-supplied tracks from the YouTube Audio Library live privately in `youtube-assets/youtube-audio-library/`.
+
+Production can use multiple tracks strategically:
+
+- under ~3m30: normally 1 track
+- ~3m30–7m: up to 2
+- ~7–11m: up to 3
+- longer: up to 4
+
+Changes prefer narrative boundaries instead of arbitrary time intervals. The mixer applies crossfades, narration-triggered ducking, conservative gain, content/theme matching and artist de-duplication. Voice-calibration jobs disable music.
+
+## Supabase control plane
+
+The factory uses:
+
+- `youtube_queue`
+- `youtube_video_variants`
+- `youtube_factory_jobs`
+- private bucket `mediaforge-assets`
+
+New eligible PT/EN variants are automatically enqueued for the GitHub backend. Job leasing uses `FOR UPDATE SKIP LOCKED` to support concurrent lanes safely.
+
+Finished renders are stored under paths similar to:
+
+```text
+mediaforge-assets/
+  renders/<queue-id>/<locale>/<github-run-id>/
+    long-form.mp4
+    narration.wav
+    long-form.srt
+    manifest.json
+    shorts/
+      short-01.mp4
+      ...
+```
+
+## Voice calibration
+
+`Media Production Test` defaults to `jobs/voice-calibration.json`. It intentionally tests terms that previously caused poor pronunciation, while keeping music disabled so timbre and articulation can be judged clearly.
+
+Voice approval is a manual quality gate before the full automated publication schedule is enabled.
 
 ## Required GitHub secrets
 
@@ -116,25 +140,15 @@ MEDIAFORGE_CORE_KEY_B64
 MEDIAFORGE_DATA_KEY_B64
 MEDIAFORGE_CORE_BUNDLE_B64
 MEDIAFORGE_VOICE_REFERENCE_B64
+SUPABASE_SECRET_KEY
 ```
 
-- `MEDIAFORGE_CORE_KEY_B64` decrypts the proprietary runtime bundle.
-- `MEDIAFORGE_DATA_KEY_B64` encrypts completed lane outputs before artifact upload.
-- `MEDIAFORGE_CORE_BUNDLE_B64` holds only the encrypted private runtime code.
-- `MEDIAFORGE_VOICE_REFERENCE_B64` holds the optimized canonical human voice reference separately from the core.
+`SUPABASE_SECRET_KEY` must be a dedicated server-side Supabase secret key for the MediaForge backend. It is used only inside GitHub Actions for the factory queue and private object storage. Never commit or print secret values.
 
-Never commit the secret values or print them into workflow logs.
+## Repository boundary
 
-## Run the production calibration
-
-1. Keep the currently configured voice-calibration core and human voice reference.
-2. Open **Actions → Media Production Test**.
-3. Choose `pt-1`.
-4. Keep `jobs/voice-calibration.json` as the manifest.
-5. Run the workflow and listen to the resulting narration before approving any full production render.
-
-The music-enabled production core is packaged separately and should only replace the calibration core after the PT-BR voice is approved and the private music library is uploaded.
+MediaForge owns audiovisual production. `portal-leonidanos` owns editorial selection, source article/metadata, thumbnails, scheduling, channel OAuth and final YouTube publication. Supabase is the persistent handoff between the two systems.
 
 ## Security boundary
 
-Do not commit plaintext proprietary core code, canonical voice-reference audio, API credentials, OAuth refresh tokens, `.env` files, decrypted runtime material, or other secrets. See `SECURITY.md` for the repository security policy.
+Do not commit plaintext private-core code, the voice-reference audio, Supabase secret keys, YouTube OAuth credentials, decrypted runtime material or `.env` files. See `SECURITY.md`.
