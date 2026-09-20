@@ -121,6 +121,7 @@ jobs:
         env:
           MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
           MEDIAFORGE_TTS_PROVIDER: chatterbox
+          MEDIAFORGE_DEBUG_SUBPROCESS_STDERR: '1'
           SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
@@ -131,6 +132,26 @@ jobs:
             --lane pt-1 \
             --locale pt-BR \
             --output-dir out/dell-canary
+
+      - name: Diagnose audio stage on render failure
+        if: failure()
+        run: |
+          set +e
+          AUDIO_DIR="out/dell-canary/audio"
+          echo "MediaForge audio diagnostics after render failure"
+          ls -lah "$AUDIO_DIR" || true
+          if [ -f "$AUDIO_DIR/music-plan.json" ]; then
+            echo "::group::music-plan.json"
+            cat "$AUDIO_DIR/music-plan.json"
+            echo
+            echo "::endgroup::"
+          fi
+          for f in "$AUDIO_DIR"/*.wav; do
+            [ -f "$f" ] || continue
+            echo "::group::ffprobe $f"
+            ffprobe -hide_banner -v error -show_streams -show_format "$f" || true
+            echo "::endgroup::"
+          done
 
       - name: Validate complete canary
         run: |
