@@ -4,19 +4,22 @@ Public orchestration and encrypted-runtime layer for the MediaForge video produc
 
 ## Current architecture
 
-The repository now contains a working four-lane PT/EN smoke pipeline while keeping the private runtime source outside the public Git tree.
+The repository contains a validated four-lane PT/EN smoke pipeline plus a separate single-lane production validation workflow. Proprietary runtime source remains outside the public Git tree.
 
 ```text
 .github/workflows/
   media-pipeline.yml
+  media-production-test.yml
 
 jobs/
   README.md
   smoke-batch.json
+  production-test.json
 
 public-worker-template/
   worker.py
   requirements.txt
+  requirements-production.txt
 
 private-worker-packaging/
   build_core_bundle.py
@@ -35,15 +38,15 @@ SECURITY.md
 
 1. Proprietary core source stays outside this public repository.
 2. `private-worker-packaging/build_core_bundle.py` creates an AES-256-GCM encrypted runtime bundle.
-3. The workflow can load that encrypted bundle from a repository path or from the `MEDIAFORGE_CORE_BUNDLE_B64` GitHub secret.
-4. GitHub Actions launches four parallel lanes: two `pt-BR` and two `en-US`.
-5. `public-worker-template/worker.py` decrypts the core only into an ephemeral temporary directory.
-6. The worker passes its lane, locale, output directory, and batch job manifest to the private `run.py` entrypoint.
-7. The runtime produces planning data, four TTS shards, captions, one horizontal long-form render, and at least five vertical Shorts.
+3. The workflow loads that encrypted bundle from `MEDIAFORGE_CORE_BUNDLE_B64` or, for the smoke workflow, from an optional repository path.
+4. `public-worker-template/worker.py` decrypts the core only into an ephemeral temporary directory.
+5. The worker passes its lane, locale, output directory, and job manifest to the private `run.py` entrypoint.
+6. The runtime produces planning data, four logical TTS shards, captions, one horizontal long-form render, and at least five vertical Shorts.
+7. Production mode can use Chatterbox Multilingual V3 voice cloning and approved real media assets.
 8. The public finalizer encrypts the complete lane output before GitHub artifact upload.
 9. Encrypted workflow artifacts are retained for two days.
 
-## Current smoke pipeline
+## Smoke pipeline
 
 `jobs/smoke-batch.json` contains four deterministic integration jobs:
 
@@ -52,13 +55,32 @@ SECURITY.md
 - `en-1` — `en-US`
 - `en-2` — `en-US`
 
-The current encrypted core exercises the full orchestration path without consuming paid APIs. Its mock voice adapter splits narration into four shards, creates a consolidated WAV, produces timed SRT captions, renders a 16:9 MP4, and derives five 9:16 MP4 Shorts per lane.
+The smoke workflow exercises the complete orchestration path without consuming production TTS. It creates a consolidated WAV, timed SRT captions, a 16:9 MP4, five 9:16 MP4 Shorts per lane, encrypted outputs, and four parallel GitHub Actions artifacts.
 
-This smoke implementation is the integration baseline for the production target of 4 long-form videos per day plus at least 5 Shorts per video.
+## Production validation
+
+`Media Production Test` is intentionally single-lane while the real voice and visual stack is being validated. Its initial choices are:
+
+- `pt-1` — `pt-BR`
+- `en-1` — `en-US`
+
+The production workflow:
+
+1. Installs the production Chatterbox dependency and FFmpeg.
+2. Restores/caches the Chatterbox model files.
+3. Materializes the encrypted proprietary core.
+4. Downloads the approved Leonidanos voice reference from the private `youtube-assets` Supabase bucket.
+5. Runs Chatterbox Multilingual V3 with the private runtime's deterministic voice configuration.
+6. Downloads only manifest-approved `official` or `licensed` media assets.
+7. Renders a 1920×1080 long-form video and at least five 1080×1920 Shorts.
+8. Validates the real TTS provider and rendered media.
+9. Encrypts the complete result before artifact upload.
+
+After PT and EN production validation pass, the same runtime can be scaled back out to parallel production lanes/shards.
 
 ## Required GitHub secrets
 
-The smoke workflow supports these repository secrets:
+The smoke workflow requires:
 
 ```text
 MEDIAFORGE_CORE_KEY_B64
@@ -66,11 +88,18 @@ MEDIAFORGE_DATA_KEY_B64
 MEDIAFORGE_CORE_BUNDLE_B64
 ```
 
+The production validation additionally requires:
+
+```text
+SUPABASE_SERVICE_ROLE_KEY
+```
+
 - `MEDIAFORGE_CORE_KEY_B64` decrypts the proprietary runtime bundle.
 - `MEDIAFORGE_DATA_KEY_B64` encrypts completed lane outputs before artifact upload.
-- `MEDIAFORGE_CORE_BUNDLE_B64` can hold the base64 representation of the encrypted runtime bundle when the bundle is not committed to the repository.
+- `MEDIAFORGE_CORE_BUNDLE_B64` holds the base64 representation of the encrypted runtime bundle.
+- `SUPABASE_SERVICE_ROLE_KEY` is used only inside the production runner to read the approved private voice reference from Supabase Storage.
 
-Never commit the secret values.
+Never commit the secret values or print them into workflow logs.
 
 ## Build the private core bundle
 
@@ -91,14 +120,20 @@ To keep even the encrypted binary out of the public repository, base64-encode `c
 
 ## Run the smoke workflow
 
-After the three GitHub secrets are configured:
-
 1. Open **Actions → Media Pipeline**.
 2. Choose **Run workflow**.
 3. Keep `jobs/smoke-batch.json` as the job manifest.
 4. Run the workflow.
 
-Each successful lane must contain a result manifest, a non-empty long-form MP4, and at least five non-empty Short MP4 files before its encrypted artifact is uploaded.
+## Run the production validation
+
+After the encrypted core secret is updated to the current production-capable bundle and `SUPABASE_SERVICE_ROLE_KEY` is configured:
+
+1. Open **Actions → Media Production Test**.
+2. Choose `pt-1` first.
+3. Keep `jobs/production-test.json` as the manifest.
+4. Run the workflow and validate its encrypted artifact.
+5. Repeat with `en-1` after PT succeeds.
 
 ## Security boundary
 
