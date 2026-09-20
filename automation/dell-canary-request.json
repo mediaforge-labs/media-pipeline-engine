@@ -1,5 +1,5 @@
 {
   "queue_id": "530e6f9a-7c9d-4cb8-b0a6-69e4ac8fc00c",
-  "reason": "rerun_after_refreshed_gta_vi_catalog_documents_2026_09_20",
+  "reason": "full_canary_after_persistent_gateway_v3_and_zero_stale_smoke",
   "publish": false
 }
