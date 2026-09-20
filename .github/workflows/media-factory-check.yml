@@ -38,6 +38,7 @@ jobs:
       - name: Compile factory pipeline
         run: |
           set -euo pipefail
+          python --version
           python -m py_compile \
             public-worker-template/factory_worker_v2.py \
             public-worker-template/factory_worker_v3.py \
