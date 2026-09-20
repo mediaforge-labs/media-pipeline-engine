@@ -1,5 +1,5 @@
 {
-  "reason": "validate_gateway_v3_native_catalog_zero_stale",
+  "reason": "retest_gateway_v3_after_control_json_hardening",
   "publish": false,
-  "requested_at": "2026-09-20T23:36:00Z"
+  "requested_at": "2026-09-20T23:38:00Z"
 }
