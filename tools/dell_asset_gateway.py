@@ -23,7 +23,9 @@ from xml.etree import ElementTree as ET
 VIDEO_EXTENSIONS={'.mp4','.mov','.mkv','.webm','.m4v','.avi'}
 INDEX_STEMS={'repositorio gta','catalogo geral','transcricao visual gta vi'}
 EXCLUDED_PARTS={'output','outputs','youtube','renders','render','tmp','temp','.git'}
-DEFAULT_MAX_ASSET_BYTES=1024*1024*1024
+# GitHub-hosted runners have limited ephemeral disk. Keep the on-demand catalog
+# focused on already-cut source clips; giant raw masters remain on Dell.
+DEFAULT_MAX_ASSET_BYTES=250*1024*1024
 
 def norm(value:str)->str:
     value=unicodedata.normalize('NFKD',value)
@@ -173,7 +175,7 @@ def heartbeat(state:State):
         try:
             endpoint=''; ep=pathlib.Path(state.args.endpoint_file)
             if ep.exists(): endpoint=ep.read_text(encoding='utf-8',errors='ignore').strip()
-            body={'gateway_id':state.args.gateway_id,'public_url':endpoint or None,'status':'online' if endpoint else 'degraded','root_label':r'C:\LeonidanosVideoPipeline','heartbeat_at':datetime.now(timezone.utc).isoformat(),'updated_at':datetime.now(timezone.utc).isoformat(),'metadata':{'pid':os.getpid(),'catalog_mode':'metadata-only'}}
+            body={'gateway_id':state.args.gateway_id,'public_url':endpoint or None,'status':'online' if endpoint else 'degraded','root_label':r'C:\LeonidanosVideoPipeline','heartbeat_at':datetime.now(timezone.utc).isoformat(),'updated_at':datetime.now(timezone.utc).isoformat(),'metadata':{'pid':os.getpid(),'catalog_mode':'metadata-only','max_asset_bytes':state.args.max_asset_bytes}}
             postgrest(state.args.supabase_url,state.args.supabase_key,'POST','mediaforge_asset_gateways',body=body,prefer='resolution=merge-duplicates,return=minimal')
         except Exception as e: print('[heartbeat]',e)
         time.sleep(20)
@@ -184,8 +186,8 @@ def sync_catalog(args):
         batch=[]
         for item in assets[i:i+100]: item['last_seen_at']=now; item['updated_at']=now; batch.append(item)
         postgrest(args.supabase_url,args.supabase_key,'POST','mediaforge_assets',body=batch,prefer='resolution=merge-duplicates,return=minimal')
-    postgrest(args.supabase_url,args.supabase_key,'POST','mediaforge_asset_gateways',body={'gateway_id':args.gateway_id,'status':'degraded','root_label':r'C:\LeonidanosVideoPipeline','heartbeat_at':now,'metadata':{'catalog_assets':len(assets),'index_files':[p.name for p in index_files]},'updated_at':now},prefer='resolution=merge-duplicates,return=minimal')
-    print(json.dumps({'status':'catalog_synced','assets':len(assets),'indexes':[p.name for p in index_files]},ensure_ascii=False))
+    postgrest(args.supabase_url,args.supabase_key,'POST','mediaforge_asset_gateways',body={'gateway_id':args.gateway_id,'status':'degraded','root_label':r'C:\LeonidanosVideoPipeline','heartbeat_at':now,'metadata':{'catalog_assets':len(assets),'index_files':[p.name for p in index_files],'max_asset_bytes':args.max_asset_bytes},'updated_at':now},prefer='resolution=merge-duplicates,return=minimal')
+    print(json.dumps({'status':'catalog_synced','assets':len(assets),'indexes':[p.name for p in index_files],'max_asset_mb':round(args.max_asset_bytes/1024/1024,1)},ensure_ascii=False))
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--root',default=r'C:\LeonidanosVideoPipeline'); ap.add_argument('--gateway-id',default='dell-main'); ap.add_argument('--host',default='127.0.0.1'); ap.add_argument('--port',type=int,default=8765); ap.add_argument('--endpoint-file',default=str(pathlib.Path(os.environ.get('LOCALAPPDATA','.'),'MediaForge','gateway-url.txt'))); ap.add_argument('--sync-catalog',action='store_true'); ap.add_argument('--max-asset-bytes',type=int,default=DEFAULT_MAX_ASSET_BYTES)
