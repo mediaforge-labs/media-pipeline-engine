@@ -1,0 +1,173 @@
+name: MediaForge Dell Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      queue_id:
+        description: YouTube queue ID to render
+        required: false
+        default: 530e6f9a-7c9d-4cb8-b0a6-69e4ac8fc00c
+  push:
+    paths:
+      - automation/dell-canary-request.json
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: PT-BR / Dell on-demand canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            public-worker-template/requirements.txt
+            public-worker-template/requirements-production.txt
+
+      - name: Cache Chatterbox models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: chatterbox-multilingual-v3-${{ runner.os }}-${{ runner.arch }}-v3
+
+      - name: Install production dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip setuptools wheel
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchaudio==2.6.0
+          pip install -r public-worker-template/requirements.txt
+          pip install -r public-worker-template/requirements-production.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Materialize encrypted production core v7
+        run: |
+          set -euo pipefail
+          mkdir -p .runtime
+          cat \
+            encrypted-core/v7/part-01a.b64 \
+            encrypted-core/v7/part-01b.b64 \
+            encrypted-core/v7/part-02.b64 \
+            encrypted-core/v7/part-03.b64 \
+            encrypted-core/v7/part-04.b64 \
+            | tr -d '\r\n\t ' | base64 --decode > .runtime/core.bundle.enc
+          test "$(stat -c%s .runtime/core.bundle.enc)" -eq 21279
+          echo "MEDIAFORGE_BUNDLE_PATH=$(realpath .runtime/core.bundle.enc)" >> "$GITHUB_ENV"
+
+      - name: Materialize approved human voice
+        env:
+          VOICE_REFERENCE_B64: ${{ secrets.MEDIAFORGE_VOICE_REFERENCE_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$VOICE_REFERENCE_B64"
+          printf '%s' "$VOICE_REFERENCE_B64" | base64 --decode > .runtime/voice-reference.ogg
+          ffmpeg -y -loglevel error -i .runtime/voice-reference.ogg -vn -ac 1 -ar 24000 -c:a pcm_s16le .runtime/voice-reference.wav
+          echo "MEDIAFORGE_VOICE_REFERENCE_PATH=$(realpath .runtime/voice-reference.wav)" >> "$GITHUB_ENV"
+
+      - name: Resolve canary queue
+        env:
+          MANUAL_QUEUE_ID: ${{ github.event.inputs.queue_id }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          q=(os.environ.get('MANUAL_QUEUE_ID') or '').strip()
+          p=pathlib.Path('automation/dell-canary-request.json')
+          if not q and p.exists():
+              q=str(json.loads(p.read_text(encoding='utf-8')).get('queue_id') or '').strip()
+          if not q:
+              q='530e6f9a-7c9d-4cb8-b0a6-69e4ac8fc00c'
+          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as f:
+              f.write(f'CANARY_QUEUE_ID={q}\n')
+          print('queue_id=',q)
+          PY
+
+      - name: Build canary job from Supabase queue
+        env:
+          SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          python public-worker-template/build_canary_job.py \
+            --queue-id "$CANARY_QUEUE_ID" \
+            --output .runtime/dell-canary-job.json \
+            --script-out .runtime/dell-canary-script.txt
+
+      - name: Fetch only selected Dell assets
+        env:
+          SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          TITLE="$(python -c "import json;print(json.load(open('.runtime/dell-canary-job.json'))['jobs']['pt-1']['title'])")"
+          python public-worker-template/dell_asset_client.py \
+            --title "$TITLE" \
+            --script-file .runtime/dell-canary-script.txt \
+            --dest .runtime/dell-assets \
+            --max-assets 18 \
+            --job-key "dell-canary-${GITHUB_RUN_ID}"
+          echo "MEDIAFORGE_VIDEO_LIBRARY_ROOT=$(realpath .runtime/dell-assets)" >> "$GITHUB_ENV"
+
+      - name: Render long-form and Shorts
+        env:
+          MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
+          MEDIAFORGE_TTS_PROVIDER: chatterbox
+          SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          python public-worker-template/worker.py \
+            --bundle "$MEDIAFORGE_BUNDLE_PATH" \
+            --job .runtime/dell-canary-job.json \
+            --lane pt-1 \
+            --locale pt-BR \
+            --output-dir out/dell-canary
+
+      - name: Validate complete canary
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          root=pathlib.Path('out/dell-canary')
+          m=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
+          metrics=m.get('metrics') or {}
+          library=(m.get('media') or {}).get('video_library') or m.get('video_library') or {}
+          shorts=list((root/'shorts').glob('short-*.mp4'))
+          longform=root/'video'/'long-form.mp4'
+          if not longform.is_file() or longform.stat().st_size < 100000:
+              raise SystemExit('long-form missing or too small')
+          if len(shorts) < 5:
+              raise SystemExit(f'expected >=5 Shorts, got {len(shorts)}')
+          if int(metrics.get('video_assets') or 0) < 1:
+              raise SystemExit('no video assets used')
+          print(json.dumps({'long_form_bytes':longform.stat().st_size,'shorts':len(shorts),'video_assets':metrics.get('video_assets'),'music_tracks':metrics.get('music_tracks'),'narration_seconds':metrics.get('narration_seconds')},ensure_ascii=False))
+          PY
+
+      - name: Upload complete canary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediaforge-dell-canary-${{ github.run_id }}
+          path: |
+            out/dell-canary/video/long-form.mp4
+            out/dell-canary/shorts/*.mp4
+            out/dell-canary/audio/narration.wav
+            out/dell-canary/audio/music-plan.json
+            out/dell-canary/captions/long-form.srt
+            out/dell-canary/media/manifest.json
+            out/dell-canary/manifest.json
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
+
+      - name: Delete temporary Dell copies from runner
+        if: always()
+        run: |
+          rm -rf .runtime/dell-assets
+          echo 'Temporary Dell assets removed from GitHub runner.'
