@@ -1,0 +1,104 @@
+name: MediaForge Dell Integration Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - automation/dell-integration-smoke-request.json
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install smoke dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install requests==2.34.2
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          python -m py_compile \
+            public-worker-template/dell_asset_client.py \
+            public-worker-template/dell_asset_client_v5.py
+
+      - name: Build compact semantic request
+        run: |
+          set -euo pipefail
+          mkdir -p .runtime
+          cat > .runtime/smoke-script.txt <<'EOF'
+          Lucia and Jason move through Vice City at night while cars cross busy streets. Police patrols, neon districts, beaches, boats and highways show the range of GTA VI locations and activities. The test needs several different official GTA VI source clips so the factory can prove the refreshed Dell catalog contains reachable, unique media files without reusing the same source.
+          EOF
+
+      - name: Fetch refreshed Dell media sample
+        env:
+          SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          python public-worker-template/dell_asset_client_v5.py \
+            --title 'GTA VI Vice City Lucia Jason cars police night' \
+            --script-file .runtime/smoke-script.txt \
+            --dest .runtime/dell-smoke \
+            --max-assets 12 \
+            --max-total-bytes 1073741824 \
+            --job-key "dell-integration-smoke-${GITHUB_RUN_ID}"
+
+      - name: Validate downloaded sample
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib, subprocess
+          root=pathlib.Path('.runtime/dell-smoke')
+          selection=json.loads((root/'mediaforge-selection.json').read_text(encoding='utf-8'))
+          catalog=json.loads((root/'Catalogo geral.json').read_text(encoding='utf-8'))
+          selected=int(selection.get('downloaded_unique_assets') or selection.get('selected_unique_assets') or 0)
+          required=int(selection.get('required_unique_assets') or 0)
+          if selected < required or required < 1:
+              raise SystemExit(f'insufficient sample: selected={selected} required={required}')
+          files=[]
+          for item in catalog.get('assets',[]):
+              p=root/item['local_name']
+              if not p.is_file() or p.stat().st_size <= 0:
+                  raise SystemExit(f'missing downloaded asset: {p}')
+              subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=codec_name,width,height','-of','json',str(p)],check=True,stdout=subprocess.DEVNULL)
+              files.append(p)
+          summary={
+              'status':'integration_smoke_ok',
+              'selected_unique_assets':selected,
+              'required_unique_assets':required,
+              'ffprobe_verified':len(files),
+              'stale_catalog_assets_skipped':len(selection.get('unavailable_catalog_assets') or []),
+              'scope':selection.get('scope'),
+              'reuse_allowed':selection.get('reuse_allowed'),
+          }
+          print(json.dumps(summary,ensure_ascii=False))
+          (root/'integration-summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+
+      - name: Upload smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediaforge-dell-integration-smoke-${{ github.run_id }}
+          path: |
+            .runtime/dell-smoke/integration-summary.json
+            .runtime/dell-smoke/mediaforge-selection.json
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Delete downloaded sample
+        if: always()
+        run: rm -rf .runtime/dell-smoke
