@@ -1,0 +1,57 @@
+name: MediaForge Factory Static Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - public-worker-template/factory_worker_v2.py
+      - public-worker-template/factory_worker_v3.py
+      - public-worker-template/dell_asset_client.py
+      - public-worker-template/dell_asset_client_v5.py
+      - public-worker-template/worker.py
+      - public-worker-template/validate_render.py
+      - .github/workflows/media-factory.yml
+      - .github/workflows/media-factory-check.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mediaforge-factory-static-check
+  cancel-in-progress: true
+
+jobs:
+  static-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile factory pipeline
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            public-worker-template/factory_worker_v2.py \
+            public-worker-template/factory_worker_v3.py \
+            public-worker-template/dell_asset_client.py \
+            public-worker-template/dell_asset_client_v5.py \
+            public-worker-template/worker.py \
+            public-worker-template/validate_render.py
+
+      - name: Verify production workflow uses strict V3
+        run: |
+          set -euo pipefail
+          grep -q 'factory_worker_v3.py' .github/workflows/media-factory.yml
+          grep -q "MEDIAFORGE_TTS_STRICT_CHUNK_ORDER: '1'" .github/workflows/media-factory.yml
+          grep -q "MEDIAFORGE_STRICT_UNIQUE_MEDIA: '1'" .github/workflows/media-factory.yml
+          grep -q 'music_enabled.*False' public-worker-template/factory_worker_v3.py
+          grep -q -- '--verify-only' public-worker-template/factory_worker_v3.py
+          grep -q -- '--require-five-shorts' public-worker-template/factory_worker_v3.py
