@@ -9,12 +9,23 @@ import pathlib
 import subprocess
 import sys
 from datetime import datetime, timezone
-from urllib.parse import quote
 
+import boto3
 import requests
+from boto3.s3.transfer import TransferConfig
+from botocore.client import Config
 
 SUPABASE_BUCKET = "mediaforge-assets"
-RENDER_VERSION = "mediaforge-github-v7"
+SUPABASE_PROJECT_REF = "rhddgfvtrkmusbvphnlg"
+SUPABASE_S3_REGION = "us-west-2"
+SUPABASE_S3_ENDPOINT = f"https://{SUPABASE_PROJECT_REF}.storage.supabase.co/storage/v1/s3"
+RENDER_VERSION = "mediaforge-github-v8"
+TRANSFER_CONFIG = TransferConfig(
+    multipart_threshold=64 * 1024 * 1024,
+    multipart_chunksize=64 * 1024 * 1024,
+    max_concurrency=4,
+    use_threads=True,
+)
 
 
 def required(name: str) -> str:
@@ -26,11 +37,15 @@ def required(name: str) -> str:
 
 def api_headers() -> dict[str, str]:
     key = required("SUPABASE_SECRET_KEY")
-    return {
+    headers = {
         "apikey": key,
-        "Authorization": f"Bearer {key}",
-        "User-Agent": "MediaForge/1.1",
+        "User-Agent": "MediaForge/1.2",
     }
+    # New sb_secret_ keys are opaque API keys, not JWTs. They must not be
+    # parsed as bearer JWTs. Legacy service_role JWTs still support Bearer.
+    if not key.startswith("sb_secret_"):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
 
 
 def rest_url(path: str) -> str:
@@ -48,6 +63,17 @@ def request_json(method: str, url: str, *, params=None, body=None, extra_headers
     if not response.content:
         return None
     return response.json()
+
+
+def s3_client():
+    return boto3.client(
+        "s3",
+        endpoint_url=SUPABASE_S3_ENDPOINT,
+        region_name=SUPABASE_S3_REGION,
+        aws_access_key_id=required("SUPABASE_S3_ACCESS_KEY_ID"),
+        aws_secret_access_key=required("SUPABASE_S3_SECRET_ACCESS_KEY"),
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
 
 
 def lease_job(locale: str, owner: str) -> dict | None:
@@ -112,20 +138,25 @@ def build_job_manifest(job: dict, queue: dict, variant: dict, lane: str, locale:
     }
 
 
-def storage_upload(local_path: pathlib.Path, storage_path: str) -> str:
+def storage_upload(client, local_path: pathlib.Path, storage_path: str) -> str:
     if not local_path.is_file() or local_path.stat().st_size <= 0:
         raise RuntimeError(f"Output file missing: {local_path}")
-    encoded = quote(storage_path, safe="/")
-    url = f"{required('SUPABASE_URL').rstrip('/')}/storage/v1/object/{SUPABASE_BUCKET}/{encoded}"
-    headers = api_headers()
-    headers.update({
-        "Content-Type": mimetypes.guess_type(local_path.name)[0] or "application/octet-stream",
-        "Cache-Control": "3600",
-    })
-    with local_path.open("rb") as fh:
-        response = requests.post(url, headers=headers, data=fh, timeout=(30, 3600))
-    if response.status_code >= 400:
-        raise RuntimeError(f"Storage upload failed for {storage_path} ({response.status_code}): {response.text[:500]}")
+    extra = {
+        "ContentType": mimetypes.guess_type(local_path.name)[0] or "application/octet-stream",
+        "CacheControl": "3600",
+    }
+    client.upload_file(
+        Filename=str(local_path),
+        Bucket=SUPABASE_BUCKET,
+        Key=storage_path,
+        ExtraArgs=extra,
+        Config=TRANSFER_CONFIG,
+    )
+    remote = client.head_object(Bucket=SUPABASE_BUCKET, Key=storage_path)
+    remote_size = int(remote.get("ContentLength", -1))
+    local_size = local_path.stat().st_size
+    if remote_size != local_size:
+        raise RuntimeError(f"Storage verification failed for {storage_path}: local={local_size}, remote={remote_size}")
     return f"supabase://{SUPABASE_BUCKET}/{storage_path}"
 
 
@@ -188,12 +219,16 @@ def run_factory(args: argparse.Namespace) -> int:
         runtime = pathlib.Path(args.runtime_dir)
         runtime.mkdir(parents=True, exist_ok=True)
         job_path = runtime / f"factory-job-{args.lane}.json"
-        job_path.write_text(json.dumps(build_job_manifest(job, queue, variant, args.lane, args.locale), ensure_ascii=False, indent=2), encoding="utf-8")
+        job_path.write_text(
+            json.dumps(build_job_manifest(job, queue, variant, args.lane, args.locale), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
         env = os.environ.copy()
         env["MEDIAFORGE_TTS_PROVIDER"] = "chatterbox"
         subprocess.run([
-            sys.executable, args.worker,
+            sys.executable,
+            args.worker,
             "--bundle", args.bundle,
             "--job", str(job_path),
             "--lane", args.lane,
@@ -205,14 +240,15 @@ def run_factory(args: argparse.Namespace) -> int:
         manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
         run_key = os.environ.get("GITHUB_RUN_ID", datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))
         prefix = f"renders/{job['queue_id']}/{args.locale}/{run_key}"
+        storage = s3_client()
 
-        video_uri = storage_upload(out / "video" / "long-form.mp4", f"{prefix}/long-form.mp4")
-        audio_uri = storage_upload(out / "audio" / "narration.wav", f"{prefix}/narration.wav")
-        manifest_uri = storage_upload(out / "manifest.json", f"{prefix}/manifest.json")
-        storage_upload(out / "captions" / "long-form.srt", f"{prefix}/long-form.srt")
+        video_uri = storage_upload(storage, out / "video" / "long-form.mp4", f"{prefix}/long-form.mp4")
+        audio_uri = storage_upload(storage, out / "audio" / "narration.wav", f"{prefix}/narration.wav")
+        manifest_uri = storage_upload(storage, out / "manifest.json", f"{prefix}/manifest.json")
+        storage_upload(storage, out / "captions" / "long-form.srt", f"{prefix}/long-form.srt")
         short_uris = []
         for short in sorted((out / "shorts").glob("short-*.mp4")):
-            short_uris.append(storage_upload(short, f"{prefix}/shorts/{short.name}"))
+            short_uris.append(storage_upload(storage, short, f"{prefix}/shorts/{short.name}"))
 
         current = str(variant.get("status") or "")
         if current == "thumbnail_ready":
