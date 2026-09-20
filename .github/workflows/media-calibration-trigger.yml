@@ -1,0 +1,35 @@
+name: MediaForge Voice Calibration Trigger
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - automation/voice-calibration-request.json
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: mediaforge-voice-calibration-trigger
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Dispatch PT-BR calibration
+        run: |
+          set -euo pipefail
+          gh workflow run media-production-test.yml \
+            --repo "$REPO" \
+            --ref main \
+            -f lane=pt-1 \
+            -f job_manifest=jobs/voice-calibration.json
+          echo "PT-BR voice calibration dispatched."
