@@ -19,10 +19,6 @@ on:
 permissions:
   contents: read
 
-env:
-  SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
-  VOICE_REFERENCE_OBJECT: audio/530e6f9a-7c9d-4cb8-b0a6-69e4ac8fc00c/voz-leonidanos-oficial.mp3
-
 jobs:
   production-test:
     name: ${{ inputs.lane }} / Chatterbox V3
@@ -65,7 +61,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Materialize encrypted core bundle
+      - name: Materialize encrypted production core
         env:
           CORE_BUNDLE_B64: ${{ secrets.MEDIAFORGE_CORE_BUNDLE_B64 }}
         run: |
@@ -79,43 +75,13 @@ jobs:
           test -s .runtime/core.bundle.enc
           echo "MEDIAFORGE_BUNDLE_PATH=$(realpath .runtime/core.bundle.enc)" >> "$GITHUB_ENV"
 
-      - name: Download official Leonidanos voice reference
-        env:
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: |
-          set -euo pipefail
-          mkdir -p .runtime
-
-          if [ -n "$SUPABASE_SECRET_KEY" ]; then
-            curl --fail --silent --show-error --location \
-              -H "apikey: $SUPABASE_SECRET_KEY" \
-              "$SUPABASE_URL/storage/v1/object/authenticated/youtube-assets/$VOICE_REFERENCE_OBJECT" \
-              -o .runtime/voice-source.mp3
-          elif [ -n "$SUPABASE_SERVICE_ROLE_KEY" ]; then
-            curl --fail --silent --show-error --location \
-              -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-              -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-              "$SUPABASE_URL/storage/v1/object/authenticated/youtube-assets/$VOICE_REFERENCE_OBJECT" \
-              -o .runtime/voice-source.mp3
-          else
-            echo "Configure SUPABASE_SECRET_KEY (preferred) or SUPABASE_SERVICE_ROLE_KEY."
-            exit 1
-          fi
-
-          test -s .runtime/voice-source.mp3
-          ffmpeg -y -ss 0 -t 10 -i .runtime/voice-source.mp3 \
-            -vn -ac 1 -ar 24000 -c:a pcm_s16le .runtime/voice-reference.wav
-          test -s .runtime/voice-reference.wav
-          echo "MEDIAFORGE_VOICE_REFERENCE_PATH=$(realpath .runtime/voice-reference.wav)" >> "$GITHUB_ENV"
-
       - name: Validate production manifest
         run: |
           set -euo pipefail
           test -f "${{ inputs.job_manifest }}"
           python -m json.tool "${{ inputs.job_manifest }}" >/dev/null
 
-      - name: Run Chatterbox production core
+      - name: Run human-voice production core
         env:
           MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
           MEDIAFORGE_TTS_PROVIDER: chatterbox
@@ -140,12 +106,14 @@ jobs:
           lane = os.environ['LANE']
           with open(f'out/{lane}/manifest.json', encoding='utf-8') as f:
               data = json.load(f)
-          provider = data['pipeline']['tts']['provider']
-          if provider != 'chatterbox-multilingual-v3':
-              raise SystemExit(f'Unexpected TTS provider: {provider}')
+          tts = data['pipeline']['tts']
+          if tts['provider'] != 'chatterbox-multilingual-v3':
+              raise SystemExit(f"Unexpected TTS provider: {tts['provider']}")
+          if tts.get('pronunciation_profile') != 'pt-br-human-v3' and data['job']['locale'] == 'pt-BR':
+              raise SystemExit('Old Portuguese pronunciation profile detected')
           if data['metrics']['media_assets'] < 1:
               raise SystemExit('No real media assets were rendered')
-          print(json.dumps(data['metrics'], ensure_ascii=False))
+          print(json.dumps({'tts': tts, 'metrics': data['metrics']}, ensure_ascii=False))
           PY
         env:
           LANE: ${{ inputs.lane }}
