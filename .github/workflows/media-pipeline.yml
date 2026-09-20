@@ -7,6 +7,10 @@ on:
         description: Encrypted proprietary core bundle path
         required: false
         default: private-worker-core/core.bundle.enc
+      job_manifest:
+        description: Batch job manifest path
+        required: false
+        default: jobs/smoke-batch.json
 
 permissions:
   contents: read
@@ -15,6 +19,7 @@ jobs:
   render:
     name: ${{ matrix.lane }} / ${{ matrix.locale }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -40,27 +45,43 @@ jobs:
           cache: pip
           cache-dependency-path: public-worker-template/requirements.txt
 
-      - name: Install worker dependencies
-        run: pip install -r public-worker-template/requirements.txt
+      - name: Install runtime dependencies
+        run: |
+          pip install -r public-worker-template/requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
-      - name: Validate encrypted core bundle
+      - name: Validate pipeline inputs
         env:
           BUNDLE_PATH: ${{ inputs.bundle_path }}
+          JOB_MANIFEST: ${{ inputs.job_manifest }}
         run: |
           test -f "$BUNDLE_PATH" || {
             echo "Encrypted core bundle not found: $BUNDLE_PATH"
             exit 1
           }
+          test -f "$JOB_MANIFEST" || {
+            echo "Job manifest not found: $JOB_MANIFEST"
+            exit 1
+          }
+          python -m json.tool "$JOB_MANIFEST" >/dev/null
 
-      - name: Run worker
+      - name: Run encrypted MediaForge core
         env:
           MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
         run: |
           python public-worker-template/worker.py \
             --bundle "${{ inputs.bundle_path }}" \
+            --job "${{ inputs.job_manifest }}" \
             --lane "${{ matrix.lane }}" \
             --locale "${{ matrix.locale }}" \
             --output-dir "out/${{ matrix.lane }}"
+
+      - name: Validate generated media
+        run: |
+          test -s "out/${{ matrix.lane }}/manifest.json"
+          test -s "out/${{ matrix.lane }}/video/long-form.mp4"
+          test "$(find "out/${{ matrix.lane }}/shorts" -name 'short-*.mp4' -type f -size +0c | wc -l)" -ge 5
 
       - name: Encrypt worker result
         env:
