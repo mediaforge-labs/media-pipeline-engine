@@ -11,9 +11,15 @@ authorization instead.
 Because the legacy main() still creates one catalog-wide request before it starts downloading,
 we explicitly bypass only that obsolete oversized request here. Status/catalog/delete calls and
 all real single-asset create_request calls continue to hit the Dell control endpoint normally.
+
+The legacy fallback loop also had a bookkeeping bug when more than one stale catalog asset was
+encountered for the same narration segment: the first failed replacement changed the segment map,
+but a second replacement still tried to update the original asset id. V5 patches that call so the
+map advances from the currently failed candidate to the next candidate on every hop.
 """
 
 import importlib.util
+import inspect
 import pathlib
 import time
 import urllib.error
@@ -29,6 +35,19 @@ if spec is None or spec.loader is None:
     raise SystemExit("Unable to load Dell asset client")
 legacy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(legacy)
+
+
+def _patch_legacy_multihop_mapping() -> None:
+    """Fix stale->stale->valid replacement chains inside legacy.main()."""
+    source = inspect.getsource(legacy.main)
+    needle = "update_selection_for_replacement(original, replacement, reason)"
+    fixed = "update_selection_for_replacement(item, replacement, reason)"
+    if needle not in source:
+        raise SystemExit("Dell legacy fallback mapping patch no longer matches source; aborting safely")
+    exec(source.replace(needle, fixed, 1), legacy.__dict__)
+
+
+_patch_legacy_multihop_mapping()
 
 # Keep a direct reference before overriding legacy.control. The legacy main() creates a
 # catalog-wide authorization request even though V5 never uses it: download_asset() below
@@ -114,7 +133,7 @@ def download_asset(status: dict, ignored_request_id: str, ignored_token: str, it
                 url,
                 headers={
                     "X-MediaForge-Request-Token": token,
-                    "User-Agent": "MediaForge-GitHub/5.1-single-asset-auth",
+                    "User-Agent": "MediaForge-GitHub/5.2-multihop-fallback-fix",
                 },
             )
             with urllib.request.urlopen(request, timeout=1800) as source, part.open("wb") as target:
