@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "mode": "smoke",
+  "jobs": {
+    "pt-1": {
+      "id": "smoke-pt-1",
+      "locale": "pt-BR",
+      "title": "MediaForge Smoke Test PT 1",
+      "shorts_requested": 5,
+      "script": "Este é o primeiro teste completo do pipeline MediaForge em português. O objetivo é validar o fluxo do job desde a leitura do manifesto até a renderização. O roteiro é separado em cenas e mantém uma estrutura preparada para loops de retenção. A narração de teste é dividida em quatro shards independentes. Depois os shards são unidos em uma faixa principal. O pipeline também cria legendas sincronizadas e um vídeo horizontal. Em seguida cinco cortes verticais são derivados do mesmo job. Cada resultado recebe um manifesto técnico para auditoria. No ambiente de produção o provedor de voz será substituído pelo mecanismo definitivo. Este teste encerra confirmando que a cadeia está pronta para evoluir sem expor o núcleo privado."
+    },
+    "pt-2": {
+      "id": "smoke-pt-2",
+      "locale": "pt-BR",
+      "title": "MediaForge Smoke Test PT 2",
+      "shorts_requested": 5,
+      "script": "O segundo job em português verifica que duas lanes podem trabalhar sem compartilhar arquivos temporários. Cada execução recebe um identificador próprio e uma pasta isolada. O planejamento registra cenas, duração estimada e pontos de retenção. Quatro shards simulam a etapa de voz com saídas independentes. A faixa consolidada alimenta o render principal. Cinco Shorts verticais são produzidos a partir da mesma origem. O resultado final pode ser criptografado antes de sair do runner. Isso reduz a exposição de material intermediário no GitHub Actions. O manifesto também facilita rastrear falhas por etapa. Ao concluir este job teremos cobertura para a segunda lane em português."
+    },
+    "en-1": {
+      "id": "smoke-en-1",
+      "locale": "en-US",
+      "title": "MediaForge Smoke Test EN 1",
+      "shorts_requested": 5,
+      "script": "This is the first complete MediaForge pipeline smoke test in English. The job validates the path from manifest loading to final rendering. The script is converted into scenes and a retention-oriented story plan. Narration is split into four independent voice shards. Those shards are merged into one master audio track. The pipeline also creates timed captions and a horizontal long-form video. Five vertical short videos are then derived from the same source. Every output is described by a technical result manifest. Production voice providers can replace the deterministic mock adapter without changing the orchestration contract. The test ends by confirming that the private runtime can evolve behind an encrypted boundary."
+    },
+    "en-2": {
+      "id": "smoke-en-2",
+      "locale": "en-US",
+      "title": "MediaForge Smoke Test EN 2",
+      "shorts_requested": 5,
+      "script": "The second English job verifies that parallel lanes remain isolated from one another. Each runner receives its own job identifier and output directory. Planning records scenes, estimated narration time, and retention roles. Four shards represent the voice generation stage with independent files. The consolidated track becomes the source for the master render. Five vertical Shorts are produced from the same job contract. The public layer can encrypt the completed result before artifact upload. This keeps intermediate media out of the repository and reduces exposure. A final manifest makes every generated file auditable. Completing this job validates the fourth lane required by the initial factory architecture."
+    }
+  }
+}
