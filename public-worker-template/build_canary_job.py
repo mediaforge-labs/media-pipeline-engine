@@ -32,7 +32,7 @@ def audio_preflight()->None:
             subprocess.run(cmd,check=True)
         if not mixed.is_file() or mixed.stat().st_size < 1000:
             raise SystemExit('Audio preflight failed: program.wav missing or too small')
-        print(json.dumps({'status':'audio_preflight_ok','music_for_canary':False,'bytes':mixed.stat().st_size},ensure_ascii=False))
+        print(json.dumps({'status':'audio_preflight_ok','music_for_core':False,'bytes':mixed.stat().st_size},ensure_ascii=False))
 
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--queue-id',default=DEFAULT_QUEUE_ID);ap.add_argument('--output',required=True);ap.add_argument('--script-out',required=True);a=ap.parse_args()
@@ -42,6 +42,21 @@ def main():
     queue=q[0]; variant=v[0] if v else {}; title=(variant.get('youtube_title') or queue.get('youtube_title') or 'Leonidanos').strip(); script=(variant.get('tts_text') or variant.get('script') or queue.get('tts_text') or queue.get('script') or '').strip()
     if len(script.split())<20: raise SystemExit('Script too short')
     tts=pronounce_pt(script); pathlib.Path(a.script_out).write_text(tts,encoding='utf-8')
-    job={'version':1,'mode':'production','jobs':{'pt-1':{'id':f'dell-canary-{a.queue_id}','locale':'pt-BR','title':title,'shorts_requested':5,'metadata':{'music_enabled':False,'video_library_enabled':True,'video_library_max_assets':18,'queue_id':a.queue_id,'canary':True,'audio_preflight':True},'script':tts,'media':[]}}}
-    pathlib.Path(a.output).write_text(json.dumps(job,ensure_ascii=False,indent=2),encoding='utf-8'); print(json.dumps({'status':'ready','queue_id':a.queue_id,'title':title,'words':len(tts.split()),'music_enabled':False},ensure_ascii=False))
+    metadata={
+        'music_enabled':False,
+        'video_library_enabled':True,
+        'video_library_max_assets':140,
+        'video_asset_reuse_allowed':False,
+        'video_asset_max_uses':1,
+        'video_library_unique_only':True,
+        'video_library_scope':'gta-vi-owner-curated-only',
+        'tts_chunk_order_strict':True,
+        'tts_fail_on_missing_chunk':True,
+        'queue_id':a.queue_id,
+        'canary':True,
+        'audio_preflight':True,
+    }
+    job={'version':1,'mode':'production','jobs':{'pt-1':{'id':f'dell-canary-{a.queue_id}','locale':'pt-BR','title':title,'shorts_requested':5,'metadata':metadata,'script':tts,'media':[]}}}
+    pathlib.Path(a.output).write_text(json.dumps(job,ensure_ascii=False,indent=2),encoding='utf-8')
+    print(json.dumps({'status':'ready','queue_id':a.queue_id,'title':title,'words':len(tts.split()),'music_in_core':False,'unique_media_only':True,'gta_vi_only':True,'tts_chunk_order_strict':True},ensure_ascii=False))
 if __name__=='__main__':main()
