@@ -58,12 +58,24 @@ if($LASTEXITCODE -ne 0){ throw 'Falha ao instalar dependencias do gateway.' }
 $gatewayPy=Join-Path $Repo 'tools\dell_asset_gateway.py'
 if(!(Test-Path $gatewayPy)){ throw "Arquivo nao encontrado: $gatewayPy" }
 
-if($CatalogOnly){
-  & $py.Source $gatewayPy --root $Root --catalog-file $catalog --sync-catalog
-  exit $LASTEXITCODE
+# Always rebuild the metadata-only catalog from the actual Dell repository before
+# serving requests. This prevents a healthy gateway from advertising stale files after
+# media/gta_vi changes. No MP4 is uploaded; only catalog metadata is synchronized.
+Write-Host 'Atualizando catalogo metadata-only a partir do repositorio local...'
+& $py.Source $gatewayPy --root $Root --catalog-file $catalog --sync-catalog
+if($LASTEXITCODE -ne 0){ throw 'Falha ao atualizar o catalogo Dell.' }
+if(!(Test-Path $catalog -PathType Leaf)){ throw 'Catalogo local nao foi criado.' }
+
+try {
+  $cat=Get-Content $catalog -Raw | ConvertFrom-Json
+  $count=@($cat.assets).Count
+  if($count -lt 1){ throw 'Catalogo foi criado sem assets elegiveis.' }
+  Write-Host "Catalogo atualizado: $count assets unicos elegiveis no gateway."
+} catch {
+  throw "Catalogo invalido: $($_.Exception.Message)"
 }
 
-if(!(Test-Path $catalog -PathType Leaf)){ throw 'Catalogo local ausente. Rode setup_dell_asset_gateway.ps1 novamente.' }
+if($CatalogOnly){ exit 0 }
 
 Stop-SavedProcess $gatewayPid @('python','python3','py')
 Stop-SavedProcess $tunnelPid @('cloudflared')
