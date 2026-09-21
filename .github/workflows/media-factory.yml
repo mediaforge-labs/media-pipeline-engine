@@ -19,9 +19,6 @@ concurrency:
 
 jobs:
   probe:
-    # Temporary audit hold: production rendering is dispatch-only until the complete
-    # end-to-end preflight has passed.
-    if: ${{ github.event_name == 'workflow_dispatch' }}
     name: Check pending factory work
     runs-on: ubuntu-latest
     timeout-minutes: 5
