@@ -1,0 +1,90 @@
+name: Dell Active GTA VI Catalog Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - tools/dell_asset_gateway.py
+      - tools/setup_dell_asset_gateway.ps1
+      - tools/run_dell_asset_gateway.ps1
+      - .github/workflows/dell-active-catalog-check.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dell-active-gta-vi-catalog-check
+  cancel-in-progress: true
+
+jobs:
+  contract-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile gateway
+        run: |
+          set -euo pipefail
+          python -m py_compile tools/dell_asset_gateway.py
+
+      - name: Verify active repository invariants
+        run: |
+          set -euo pipefail
+          grep -q "GATEWAY_VERSION='3.0-active-gta-vi'" tools/dell_asset_gateway.py
+          grep -q "ACTIVE_EDIT_SUFFIX='-mudo.mp4'" tools/dell_asset_gateway.py
+          grep -q "scope':'media/gta_vi-active-edit-only'" tools/dell_asset_gateway.py
+          grep -q "Catalogo local antigo/incompativel" tools/dell_asset_gateway.py
+          grep -q "media/gta_vi-active-edit-only" tools/setup_dell_asset_gateway.ps1
+          grep -q "3.0-active-gta-vi" tools/setup_dell_asset_gateway.ps1
+
+      - name: Prove scan excludes legacy stock and deduplicates visual aliases
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast, hashlib, pathlib, re, tempfile, unicodedata
+          source=pathlib.Path('tools/dell_asset_gateway.py').read_text()
+          tree=ast.parse(source)
+          wanted={'norm','quick_hash','context_for_names','_is_active_edit_file','scan_catalog'}
+          nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in wanted]
+          ns={
+              'pathlib':pathlib,
+              'hashlib':hashlib,
+              're':re,
+              'unicodedata':unicodedata,
+              'VIDEO_EXTENSIONS':{'.mp4','.mov','.mkv','.webm','.m4v','.avi'},
+              'INDEX_STEMS':{'repositorio gta','catalogo geral','transcricao visual gta vi','media catalog'},
+              'EXCLUDED_PARTS':{'output','outputs','youtube','renders','render','tmp','temp','.git','fontes_oficiais'},
+              'ACTIVE_EDIT_SUFFIX':'-mudo.mp4',
+              'MIN_UNIQUE_VISUAL_BASELINE':126,
+              'duration_seconds':lambda p:1.0,
+              'read_text':lambda p:p.read_text(encoding='utf-8',errors='ignore'),
+          }
+          exec(compile(ast.Module(body=nodes,type_ignores=[]),'tools/dell_asset_gateway.py','exec'),ns)
+          with tempfile.TemporaryDirectory() as td:
+              root=pathlib.Path(td)
+              rows=[
+                  ('media/gta_vi/cortes_por_atividade/carros/a-mudo.mp4',b'AAA'),
+                  ('media/gta_vi/cortes_por_atividade/motos/a-copy-mudo.mp4',b'AAA'),
+                  ('media/gta_vi/por_local/master-mudo.mp4',b'BBBB'),
+                  ('media/stock_videos/rockstar/legacy-mudo.mp4',b'LEGACY'),
+                  ('media/gta_vi/cortes_por_atividade/carros/not-edit.mp4',b'NO'),
+              ]
+              for rel,data in rows:
+                  p=root/rel; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data)
+              (root/'REPOSITORIO_GTA.md').write_text('a-mudo.mp4 carros motos\nmaster-mudo.mp4 por_local')
+              assets,indexes,stats=ns['scan_catalog'](root,1024*1024)
+              assert stats['raw_active_edit_files']==3, stats
+              assert stats['unique_visual_assets']==2, stats
+              assert stats['deduplicated_aliases']==1, stats
+              assert len(assets)==2
+              assert all(x['collection']=='media/gta_vi' for x in assets)
+              assert all(x['relative_path'].startswith('media/gta_vi/') for x in assets)
+              assert all(x['file_name'].endswith('-mudo.mp4') for x in assets)
+              assert all('stock_videos' not in x['relative_path'] for x in assets)
+              merged=next(x for x in assets if x['visual_duplicate_count']==2)
+              assert {'carros','motos'} <= set(merged['activity_labels'])
+          print('dell_active_catalog_contract_ok')
+          PY
