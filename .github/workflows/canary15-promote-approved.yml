@@ -18,20 +18,15 @@ jobs:
     env:
       SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-      SUPABASE_S3_ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY_ID }}
-      SUPABASE_S3_SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET_ACCESS_KEY }}
-      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-      AWS_EC2_METADATA_DISABLED: 'true'
       QUEUE_ID: 530e6f9a-7c9d-4cb8-b0a6-69e4ac8fc00c
       VARIANT_ID: 67b73244-768f-4e1d-868c-6969c5598192
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
-      - name: Install storage dependencies
+      - name: Install dependencies
         run: |
-          pip install --no-cache-dir boto3 requests
+          pip install --no-cache-dir requests
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Download approved watermarked artifact
@@ -50,35 +45,48 @@ jobs:
           test -s approved/frame-0.1.jpg
           test -s approved/frame-0.5.jpg
           test -s approved/frame-0.9.jpg
-      - name: Upload approved video and patch exact PT variant
-        env:
-          PYTHONPATH: public-worker-template
+      - name: Upload approved video through Storage REST and patch exact PT variant
         run: |
           python - <<'PY'
-          import mimetypes, os, pathlib, requests
-          import factory_worker_v2 as base
+          import os, pathlib, requests
+          from urllib.parse import quote
 
           q=os.environ['QUEUE_ID']; vid=os.environ['VARIANT_ID']
+          base_url=os.environ['SUPABASE_URL'].rstrip('/')
+          key_secret=os.environ['SUPABASE_SECRET_KEY'].strip()
           p=pathlib.Path('approved/long-form.mp4')
           if not p.is_file() or p.stat().st_size < 100000:
               raise SystemExit('approved video missing/small')
 
-          key=f"renders/{q}/pt-BR/approved-canary-35603458203/long-form.mp4"
-          client=base.s3_client()
-          content_type=mimetypes.guess_type(p.name)[0] or 'video/mp4'
-          base.direct_put(client,p,key,content_type)
-          remote=base.object_size(client,key)
-          if remote != p.stat().st_size:
-              raise SystemExit(f'storage verification mismatch local={p.stat().st_size} remote={remote}')
-          uri=f"supabase://{base.SUPABASE_BUCKET}/{key}"
+          bucket='mediaforge-assets'
+          object_path=f"renders/{q}/pt-BR/approved-canary-35603458203/long-form.mp4"
+          headers={
+              'apikey': key_secret,
+              'Content-Type':'video/mp4',
+              'Content-Length':str(p.stat().st_size),
+              'Cache-Control':'3600',
+              'x-upsert':'true',
+          }
+          if not key_secret.startswith('sb_secret_'):
+              headers['Authorization']='Bearer '+key_secret
 
-          h={"apikey":os.environ["SUPABASE_SECRET_KEY"],"Authorization":"Bearer "+os.environ["SUPABASE_SECRET_KEY"],"Content-Type":"application/json","Prefer":"return=representation"}
-          url=os.environ["SUPABASE_URL"].rstrip('/')+'/rest/v1/youtube_video_variants'
-          payload={"video_url":uri,"render_version":"mediaforge-github-v10-approved-watermark","status":"upload_ready","last_error":None}
-          r=requests.patch(url,headers=h,params={"id":f"eq.{vid}","queue_id":f"eq.{q}","locale":"eq.pt-BR"},json=payload,timeout=30)
+          upload_url=f"{base_url}/storage/v1/object/{bucket}/{quote(object_path, safe='/')}"
+          with p.open('rb') as fh:
+              r=requests.post(upload_url,headers=headers,data=fh,timeout=(30,1800))
+          if r.status_code >= 400:
+              raise SystemExit(f"storage REST upload failed {r.status_code}: {r.text[:800]}")
+          print('STORAGE_UPLOAD_OK',r.status_code,r.text[:300])
+
+          api_headers={'apikey':key_secret,'Content-Type':'application/json','Prefer':'return=representation'}
+          if not key_secret.startswith('sb_secret_'):
+              api_headers['Authorization']='Bearer '+key_secret
+          uri=f"supabase://{bucket}/{object_path}"
+          url=base_url+'/rest/v1/youtube_video_variants'
+          payload={'video_url':uri,'render_version':'mediaforge-github-v10-approved-watermark','status':'upload_ready','last_error':None}
+          r=requests.patch(url,headers=api_headers,params={'id':f'eq.{vid}','queue_id':f'eq.{q}','locale':'eq.pt-BR'},json=payload,timeout=30)
           r.raise_for_status()
           rows=r.json()
           if len(rows)!=1:
               raise SystemExit(f'checkpoint patch mismatch: {len(rows)}')
-          print('PROMOTED',q,vid,uri,remote)
+          print('PROMOTED',q,vid,uri,p.stat().st_size)
           PY
