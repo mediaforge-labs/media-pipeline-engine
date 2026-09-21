@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: mediaforge-dell-canary
+  cancel-in-progress: true
+
 jobs:
   canary:
     name: PT-BR / Dell on-demand canary
@@ -214,14 +218,6 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Validate complete canary and forbid reused source video
-        run: |
-          set -euo pipefail
-          python public-worker-template/validate_render.py \
-            --root out/dell-canary \
-            --selection .runtime/dell-assets/mediaforge-selection.json \
-            --require-five-shorts
-
       - name: Upload complete canary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -238,6 +234,14 @@ jobs:
           compression-level: 0
           retention-days: 2
           if-no-files-found: error
+
+      - name: Validate complete canary and forbid reused source video
+        run: |
+          set -euo pipefail
+          python public-worker-template/validate_render.py \
+            --root out/dell-canary \
+            --selection .runtime/dell-assets/mediaforge-selection.json \
+            --require-five-shorts
 
       - name: Delete temporary Dell copies from runner
         if: always()
