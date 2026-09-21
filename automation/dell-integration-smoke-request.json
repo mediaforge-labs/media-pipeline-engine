@@ -1,5 +1,8 @@
 {
-  "reason": "validate_persistent_gateway_v3_after_actions_cleanup",
+  "reason": "sweep_active_gta_vi_repository_from_updated_inventory",
   "publish": false,
-  "requested_at": "2026-09-20T23:56:30Z"
+  "expected_active_edit_assets": 604,
+  "eligible_collection": "media/gta_vi",
+  "eligible_suffix": "-mudo.mp4",
+  "requested_at": "2026-09-21T22:54:00Z"
 }
