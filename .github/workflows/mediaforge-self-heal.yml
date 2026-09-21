@@ -1,0 +1,203 @@
+name: MediaForge Self Heal
+
+on:
+  workflow_run:
+    workflows:
+      - MediaForge Production Factory
+      - MediaForge Dell Canary
+    types: [completed]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: mediaforge-self-heal
+  cancel-in-progress: false
+
+jobs:
+  inspect-and-heal:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Resolve failed MediaForge run
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            RUN_ID='${{ github.event.workflow_run.id }}'
+            RUN_NAME='${{ github.event.workflow_run.name }}'
+            RUN_ATTEMPT='${{ github.event.workflow_run.run_attempt }}'
+            CONCLUSION='${{ github.event.workflow_run.conclusion }}'
+          else
+            ROW="$(gh api "repos/$REPO/actions/runs?status=completed&per_page=50" --jq '
+              .workflow_runs
+              | map(select((.name == "MediaForge Production Factory" or .name == "MediaForge Dell Canary") and (.conclusion != "success" and .conclusion != "skipped")))
+              | sort_by(.updated_at)
+              | reverse
+              | .[0] // empty
+            ')"
+            if [ -z "$ROW" ] || [ "$ROW" = "null" ]; then
+              echo 'has_target=false' >> "$GITHUB_OUTPUT"
+              echo 'No failed MediaForge run found.'
+              exit 0
+            fi
+            RUN_ID="$(jq -r '.id' <<<"$ROW")"
+            RUN_NAME="$(jq -r '.name' <<<"$ROW")"
+            RUN_ATTEMPT="$(jq -r '.run_attempt // 1' <<<"$ROW")"
+            CONCLUSION="$(jq -r '.conclusion // "failure"' <<<"$ROW")"
+          fi
+
+          echo "has_target=true" >> "$GITHUB_OUTPUT"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "run_name=$RUN_NAME" >> "$GITHUB_OUTPUT"
+          echo "run_attempt=$RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
+
+          {
+            echo '# MediaForge Self Heal'
+            echo
+            echo "- Workflow: $RUN_NAME"
+            echo "- Run: $RUN_ID"
+            echo "- Attempt: $RUN_ATTEMPT"
+            echo "- Conclusion: $CONCLUSION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect failed job diagnostics
+        if: ${{ steps.target.outputs.has_target == 'true' }}
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID='${{ steps.target.outputs.run_id }}'
+          mkdir -p .self-heal/logs
+
+          gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?filter=latest&per_page=100" > .self-heal/jobs.json
+          jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | [.id,.name,.conclusion] | @tsv' .self-heal/jobs.json > .self-heal/failed-jobs.tsv
+
+          if [ ! -s .self-heal/failed-jobs.tsv ]; then
+            echo 'has_failed_jobs=false' >> "$GITHUB_OUTPUT"
+            echo 'No failed jobs were returned for this run.'
+            exit 0
+          fi
+
+          echo 'has_failed_jobs=true' >> "$GITHUB_OUTPUT"
+          while IFS=$'\t' read -r JOB_ID JOB_NAME JOB_CONCLUSION; do
+            SAFE_NAME="$(printf '%s' "$JOB_NAME" | tr -cs '[:alnum:]._-' '_')"
+            {
+              echo "JOB_ID=$JOB_ID"
+              echo "JOB_NAME=$JOB_NAME"
+              echo "JOB_CONCLUSION=$JOB_CONCLUSION"
+              gh api -H 'Accept: application/vnd.github+json' "repos/$REPO/actions/jobs/$JOB_ID/logs" || true
+            } > ".self-heal/logs/${JOB_ID}-${SAFE_NAME}.log" 2>&1
+          done < .self-heal/failed-jobs.tsv
+
+          cat .self-heal/logs/*.log > .self-heal/all-failed.log || true
+
+      - name: Classify failure
+        if: ${{ steps.collect.outputs.has_failed_jobs == 'true' }}
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os, re
+
+          text = Path('.self-heal/all-failed.log').read_text(encoding='utf-8', errors='ignore').lower()
+
+          fatal_patterns = {
+              'auth_or_secret': [
+                  r'accessdenied', r'invalid_grant', r'unauthorized', r'forbidden',
+                  r'not configured', r'missing secret', r'invalid refresh token'
+              ],
+              'deterministic_validation': [
+                  r'could not verify', r'validation failed', r'duplicate assets detected',
+                  r'incomplete semantic mapping', r'insufficient unique media',
+                  r'no such file or directory', r'assertionerror', r'syntaxerror'
+              ],
+          }
+          transient_patterns = {
+              'network_or_5xx': [
+                  r'connection reset', r'connection aborted', r'could not resolve host',
+                  r'temporary failure', r'timed out', r'timeout', r'http[^\n]*(500|502|503|504)',
+                  r'service unavailable', r'bad gateway', r'gateway timeout'
+              ],
+              'rate_limit': [r'http[^\n]*429', r'rate limit', r'too many requests'],
+              'runner_infra': [
+                  r'hosted runner.*lost communication', r'the runner has received a shutdown signal',
+                  r'no space left on device', r'exit code 137', r'killed'
+              ],
+          }
+
+          category = 'unknown'
+          retryable = False
+          for name, pats in fatal_patterns.items():
+              if any(re.search(p, text) for p in pats):
+                  category = name
+                  retryable = False
+                  break
+          else:
+              for name, pats in transient_patterns.items():
+                  if any(re.search(p, text) for p in pats):
+                      category = name
+                      retryable = True
+                      break
+
+          out = os.environ['GITHUB_OUTPUT']
+          with open(out, 'a', encoding='utf-8') as f:
+              f.write(f'category={category}\n')
+              f.write(f'retryable={str(retryable).lower()}\n')
+          print({'category': category, 'retryable': retryable})
+          PY
+
+          {
+            echo
+            echo "- Failure class: ${{ steps.classify.outputs.category }}"
+            echo "- Retryable automatically: ${{ steps.classify.outputs.retryable }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload failure diagnostics
+        if: ${{ steps.collect.outputs.has_failed_jobs == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediaforge-failure-${{ steps.target.outputs.run_id }}-attempt-${{ steps.target.outputs.run_attempt }}
+          path: .self-heal/
+          retention-days: 7
+          compression-level: 6
+          if-no-files-found: error
+
+      - name: Auto-rerun transient failure
+        if: ${{ steps.classify.outputs.retryable == 'true' && fromJSON(steps.target.outputs.run_attempt) < 3 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID='${{ steps.target.outputs.run_id }}'
+          gh api --method POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs"
+          echo 'Transient failure: failed jobs were automatically re-run.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Escalate deterministic or unknown failure
+        if: ${{ steps.collect.outputs.has_failed_jobs == 'true' && steps.classify.outputs.retryable != 'true' }}
+        shell: bash
+        run: |
+          {
+            echo
+            echo 'Automatic retry intentionally skipped to avoid wasting another expensive render.'
+            echo 'Diagnostics were preserved for external code remediation and checkpoint-aware resume.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop retry loop after maximum attempts
+        if: ${{ steps.classify.outputs.retryable == 'true' && fromJSON(steps.target.outputs.run_attempt) >= 3 }}
+        shell: bash
+        run: |
+          echo 'Maximum automatic retry attempts reached; diagnostics preserved for remediation.' >> "$GITHUB_STEP_SUMMARY"
