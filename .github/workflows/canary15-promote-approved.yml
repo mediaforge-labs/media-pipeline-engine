@@ -29,7 +29,7 @@ jobs:
           pip install --no-cache-dir requests
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
-          python -m py_compile public-worker-template/supabase_tus.py
+          python -m py_compile public-worker-template/supabase_chunked.py
       - name: Download approved watermarked artifact
         uses: actions/download-artifact@v4
         with:
@@ -46,13 +46,13 @@ jobs:
           test -s approved/frame-0.1.jpg
           test -s approved/frame-0.5.jpg
           test -s approved/frame-0.9.jpg
-      - name: Upload approved video with TUS and patch exact PT checkpoint
+      - name: Upload approved video as verified chunks and patch exact PT checkpoint
         env:
           PYTHONPATH: public-worker-template
         run: |
           python - <<'PY'
           import os, pathlib, requests
-          import supabase_tus
+          import supabase_chunked
 
           q=os.environ['QUEUE_ID']; vid=os.environ['VARIANT_ID']
           base_url=os.environ['SUPABASE_URL'].rstrip('/')
@@ -62,14 +62,12 @@ jobs:
               raise SystemExit('approved video missing/small')
 
           bucket='mediaforge-assets'
-          object_path=f"renders/{q}/pt-BR/approved-canary-35603458203/long-form.mp4"
-          uri=supabase_tus.upload_file(
+          storage_path=f"renders/{q}/pt-BR/approved-canary-35603458203/long-form.mp4"
+          uri=supabase_chunked.upload_file(
               p,
               bucket=bucket,
-              object_path=object_path,
+              storage_path=storage_path,
               content_type='video/mp4',
-              cache_control='3600',
-              upsert=True,
           )
 
           api_headers={'apikey':key_secret,'Content-Type':'application/json','Prefer':'return=representation'}
@@ -78,7 +76,7 @@ jobs:
           url=base_url+'/rest/v1/youtube_video_variants'
           payload={
               'video_url':uri,
-              'render_version':'mediaforge-github-v10-approved-watermark',
+              'render_version':'mediaforge-github-v10-approved-watermark-chunked',
               'status':'upload_ready',
               'last_error':None,
           }
