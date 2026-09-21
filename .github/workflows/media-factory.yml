@@ -13,8 +13,11 @@ on:
 permissions:
   contents: read
 
+# Scheduled polling remains serialized, while an explicit push/request gets its own
+# concurrency key. Factory workers still acquire Supabase leases atomically, so an
+# explicit corrective request cannot duplicate a job already leased by a scheduled run.
 concurrency:
-  group: mediaforge-production-factory
+  group: mediaforge-production-factory-${{ github.event_name == 'schedule' && 'scheduled' || github.run_id }}
   cancel-in-progress: false
 
 jobs:
