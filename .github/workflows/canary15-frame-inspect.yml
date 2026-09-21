@@ -22,6 +22,11 @@ jobs:
           repository: mediaforge-labs/media-pipeline-engine
           run-id: '35553959281'
           github-token: ${{ github.token }}
+      - name: Install ffmpeg
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Extract frames
         run: |
           set -euo pipefail
