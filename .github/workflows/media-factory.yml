@@ -160,6 +160,7 @@ jobs:
           MEDIAFORGE_TTS_MAX_WORKERS: '1'
           MEDIAFORGE_TTS_STRICT_CHUNK_ORDER: '1'
           MEDIAFORGE_STRICT_UNIQUE_MEDIA: '1'
+          MEDIAFORGE_ACTIVE_GTA_VI_BASELINE: '126'
           MEDIAFORGE_DEBUG_SUBPROCESS_STDERR: '1'
         run: |
           set -euo pipefail
