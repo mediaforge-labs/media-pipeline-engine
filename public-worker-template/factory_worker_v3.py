@@ -13,7 +13,11 @@ from datetime import datetime, timezone
 import factory_worker_v2 as base
 
 RENDER_VERSION = "mediaforge-github-v10-strict"
-MAX_ASSETS = 140
+# Long-form scripts can legitimately map to more than 140 semantic scenes. Keep a
+# bounded headroom below the gateway's 200-item legacy ceiling while preserving the
+# strict one-source-per-scene rule; the independent 8 GiB preflight remains the hard
+# runner storage guard.
+MAX_ASSETS = 180
 MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 
 
