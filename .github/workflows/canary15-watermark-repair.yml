@@ -28,17 +28,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Locate approved Leonidanos watermark
+      - name: Fetch approved Leonidanos watermark from Supabase
         run: |
           set -euo pipefail
-          mkdir -p repaired
-          LOGO="$(find . -type f \( -iname '*leonidanos*.png' -o -iname '*watermark*.png' -o -iname '*logo*.png' \) ! -path './canary15/*' -print | head -1)"
-          if [ -z "$LOGO" ]; then
-            echo 'No approved repository watermark PNG found; refusing to invent a brand asset.'
-            exit 42
-          fi
-          echo "LOGO=$LOGO" >> "$GITHUB_ENV"
-          echo "Using approved watermark asset: $LOGO"
+          mkdir -p repaired approved-assets
+          URL='https://rhddgfvtrkmusbvphnlg.supabase.co/storage/v1/object/public/blog-images/social-assets/leonidanos-logo.png'
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 "$URL" -o approved-assets/leonidanos-logo.png
+          test -s approved-assets/leonidanos-logo.png
+          file approved-assets/leonidanos-logo.png | grep -qi 'PNG image data'
+          echo "LOGO=approved-assets/leonidanos-logo.png" >> "$GITHUB_ENV"
       - name: Apply watermark without rerendering narration/media
         run: |
           set -euo pipefail
