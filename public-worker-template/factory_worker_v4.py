@@ -8,7 +8,7 @@ import requests
 
 import factory_worker_v2 as base
 import factory_worker_v3 as impl
-import factory_worker_v3_resilient as resilient  # patches large uploads to chunked storage
+import factory_worker_v3_resilient as resilient  # patches all production uploads to verified REST storage
 
 APPROVED_WATERMARK_URL = (
     "https://rhddgfvtrkmusbvphnlg.supabase.co/storage/v1/object/public/"
@@ -71,10 +71,8 @@ def apply_approved_watermark(video_path: pathlib.Path) -> None:
             "ffprobe",
             "-v",
             "error",
-            "-select_streams",
-            "v:0",
             "-show_entries",
-            "stream=codec_name,width,height",
+            "stream=index,codec_type,codec_name,width,height:format=duration",
             "-of",
             "json",
             str(output_path),
@@ -88,7 +86,30 @@ def apply_approved_watermark(video_path: pathlib.Path) -> None:
     marker.write_text("approved-leonidanos-watermark-v2\n", encoding="utf-8")
 
 
+def apply_output_watermarks(out: pathlib.Path) -> None:
+    """Transform every publishable MP4 before the final render validator runs."""
+    out = pathlib.Path(out)
+    long_form = out / "video" / "long-form.mp4"
+    shorts = sorted((out / "shorts").glob("short-*.mp4"))
+    if not long_form.is_file():
+        raise RuntimeError("Long-form output is missing before watermark transform")
+    if len(shorts) != 5:
+        raise RuntimeError(f"Watermark stage expected exactly 5 Shorts, got {len(shorts)}")
+
+    targets = [long_form, *shorts]
+    for path in targets:
+        apply_approved_watermark(path)
+        marker = path.with_suffix(path.suffix + ".leonidanos-watermarked")
+        if not marker.is_file():
+            raise RuntimeError(f"Watermark attestation marker missing after transform: {path}")
+
+    print(f"Approved Leonidanos watermark applied and attested on {len(targets)} videos.")
+
+
 def storage_upload(client, local_path: pathlib.Path, storage_path: str) -> str:
+    # Defense in depth: pre_upload_transform already watermarks and validates these
+    # exact files. Keep this idempotent guard so no future call-site can upload a raw
+    # long-form/Short by bypassing that hook.
     local_path = pathlib.Path(local_path)
     is_long_form = local_path.name == "long-form.mp4" and storage_path.endswith("/long-form.mp4")
     is_short = local_path.suffix.lower() == ".mp4" and "/shorts/" in storage_path
@@ -113,6 +134,7 @@ base.storage_upload = storage_upload
 impl.base.storage_upload = storage_upload
 base.patch_rows = patch_rows
 impl.base.patch_rows = patch_rows
+impl.pre_upload_transform = apply_output_watermarks
 impl.RENDER_VERSION = WATERMARK_RENDER_VERSION
 
 
