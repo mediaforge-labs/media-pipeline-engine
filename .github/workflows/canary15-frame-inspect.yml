@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/canary15-frame-inspect.yml
+      - automation/canary15-frame-inspect-trigger.json
   workflow_dispatch:
 
 permissions:
