@@ -1,0 +1,28 @@
+name: Cancel Canary 14
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/cancel-canary-14.yml
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel Canary #14
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/mediaforge-labs/media-pipeline-engine/actions/runs/35553480717/cancel
+          echo "Cancel requested for run 35553480717"
