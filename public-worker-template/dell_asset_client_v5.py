@@ -10,6 +10,10 @@ V5 keeps semantic scoring from the proven legacy client while hardening transpor
 - a live /health response is authoritative, so an old stored heartbeat cannot block a
   healthy persistent Dell gateway;
 - only the active ``media/gta_vi`` edit collection (``-mudo.mp4``) is eligible;
+- the repository's 593 activity placements are treated as 126 distinct visual cuts,
+  so category copies never inflate the unique-media budget;
+- scene granularity is lengthened modestly before selection so long scripts stay inside
+  the deduplicated clip inventory without reusing a source;
 - the eligible owner-curated catalog is availability-probed before semantic selection,
   so dead/stale catalog IDs can never consume one of the required unique scene slots.
 """
@@ -18,6 +22,7 @@ import concurrent.futures
 import importlib.util
 import inspect
 import json
+import math
 import os
 import pathlib
 import time
@@ -49,6 +54,7 @@ def _patch_legacy_multihop_mapping() -> None:
 _patch_legacy_multihop_mapping()
 _original_control = legacy.control
 _original_choose_unique_pool = legacy.choose_unique_pool
+_original_segment_script = legacy.segment_script
 
 
 def _confirm_live_gateway(status: dict) -> dict:
@@ -58,7 +64,7 @@ def _confirm_live_gateway(status: dict) -> dict:
     try:
         response = legacy.requests.get(
             f"{public_url}/health",
-            headers={"User-Agent": "MediaForge-GitHub/5.5-active-gta-vi-preflight"},
+            headers={"User-Agent": "MediaForge-GitHub/5.6-active-gta-vi-preflight"},
             timeout=12,
         )
         if response.status_code != 200:
@@ -154,7 +160,11 @@ def _is_active_edit_asset(asset: dict) -> bool:
 
 def _active_edit_assets(assets: list[dict]) -> list[dict]:
     active = [item for item in assets if _is_active_edit_asset(item)]
-    baseline = max(1, int(os.getenv("MEDIAFORGE_ACTIVE_GTA_VI_BASELINE", "604")))
+    # The current repository contains 604 organized edit-file placements, but 593 of
+    # those placements represent 126 distinct visual cuts copied into activity folders.
+    # The Dell gateway deduplicates identical source content, so the invariant here is
+    # the distinct activity-clip floor, not the directory-placement count.
+    baseline = max(1, int(os.getenv("MEDIAFORGE_ACTIVE_GTA_VI_BASELINE", "126")))
     print(
         json.dumps(
             {
@@ -162,7 +172,9 @@ def _active_edit_assets(assets: list[dict]) -> list[dict]:
                 "raw_catalog_assets": len(assets),
                 "active_edit_assets": len(active),
                 "excluded_non_edit_assets": len(assets) - len(active),
-                "repository_baseline": baseline,
+                "repository_unique_clip_baseline": baseline,
+                "repository_organized_edit_files": 604,
+                "repository_activity_files": 593,
                 "eligible_suffix": "-mudo.mp4",
                 "eligible_collection": "media/gta_vi",
             }
@@ -170,9 +182,9 @@ def _active_edit_assets(assets: list[dict]) -> list[dict]:
     )
     if len(active) < baseline:
         raise SystemExit(
-            "Active GTA VI edit catalog is below the updated repository baseline before TTS/render: "
+            "Active GTA VI unique edit inventory is below the updated repository baseline before TTS/render: "
             f"active={len(active)}, baseline={baseline}, raw_catalog={len(assets)}. "
-            "Reindex the Dell gateway from media/gta_vi; stock_videos and stock_images are not eligible."
+            "Refresh the Dell gateway catalog from media/gta_vi; stock_videos and stock_images are not eligible."
         )
     return active
 
@@ -220,7 +232,7 @@ def _probe_authorized_asset(public_url: str, request_id: str, token: str, asset:
                 url,
                 headers={
                     "X-MediaForge-Request-Token": token,
-                    "User-Agent": "MediaForge-GitHub/5.5-active-gta-vi-preflight",
+                    "User-Agent": "MediaForge-GitHub/5.6-active-gta-vi-preflight",
                     "Range": "bytes=0-0",
                 },
             )
@@ -318,21 +330,78 @@ def _live_catalog_assets(assets: list[dict]) -> tuple[list[dict], list[str]]:
     return live, sorted(stale_ids)
 
 
+def _scene_plan(script: str, live_count: int) -> tuple[list[str], int, int]:
+    """Create a no-reuse scene plan that fits the real unique inventory.
+
+    The old 12-word target forced 148-152 distinct sources for some long scripts even
+    though the refreshed repository documents 126 distinct activity clips. A 16-word
+    target (max 24) keeps normal scene duration around a few seconds and fits those same
+    narrations without repeating any source. If a future script still exceeds the live
+    inventory, target size increases only as much as necessary, up to 24 words.
+    """
+    words = max(1, len((script or "").split()))
+    configured = max(12, min(24, int(os.getenv("MEDIAFORGE_SCENE_TARGET_WORDS", "16"))))
+    target = configured
+    max_words = max(target + 4, min(30, int(math.ceil(target * 1.5))))
+    segments = _original_segment_script(script, target_words=target, max_words=max_words)
+    while len(segments) > live_count and target < 24:
+        target += 1
+        max_words = max(target + 4, min(30, int(math.ceil(target * 1.5))))
+        segments = _original_segment_script(script, target_words=target, max_words=max_words)
+    if len(segments) > live_count:
+        raise SystemExit(
+            "Narration still needs more unique GTA VI scenes than the live repository can provide without reuse: "
+            f"scenes={len(segments)}, live={live_count}, words={words}, target_words={target}. "
+            "Shorten the script or add distinct GTA VI source clips."
+        )
+    return segments, target, max_words
+
+
 def choose_unique_pool_live(title: str, script: str, assets: list[dict], max_assets: int, byte_budget: int):
     """Select semantics only from the documented active edit tree and proven-live files."""
     active_assets = _active_edit_assets(assets)
     live_assets, stale_ids = _live_catalog_assets(active_assets)
-    segments = legacy.segment_script(script)
-    words = max(1, len(script.split()))
-    required_unique = max(len(segments), (words + 11) // 12)
-    if len(live_assets) < required_unique:
+    segments, target_words, max_words = _scene_plan(script, len(live_assets))
+    if not segments:
+        raise SystemExit("Narration could not be segmented for semantic media selection")
+    if len(live_assets) < len(segments):
         raise SystemExit(
             "Live GTA VI asset inventory is insufficient before TTS/render: "
-            f"live={len(live_assets)}, required={required_unique}, active_catalog={len(active_assets)}, "
+            f"live={len(live_assets)}, required={len(segments)}, active_catalog={len(active_assets)}, "
             f"raw_catalog={len(assets)}, stale={len(stale_ids)}. Refresh/reindex the Dell "
             "media/gta_vi collection; reuse remains disabled."
         )
-    return _original_choose_unique_pool(title, script, live_assets, max_assets, byte_budget)
+
+    print(
+        json.dumps(
+            {
+                "semantic_scene_plan": "complete",
+                "script_words": len(script.split()),
+                "scene_segments": len(segments),
+                "scene_target_words": target_words,
+                "scene_max_words": max_words,
+                "live_unique_assets": len(live_assets),
+                "reuse_allowed": False,
+            }
+        )
+    )
+
+    previous_segmenter = legacy.segment_script
+
+    def planned_segmenter(text: str, target_words: int = 12, max_words: int = 18) -> list[str]:
+        del target_words, max_words
+        if text == script:
+            return list(segments)
+        return _original_segment_script(text, target_words=target_words, max_words=max_words)
+
+    # The legacy selector computes a conservative reserve count from 12-word scenes but
+    # looks up segment_script dynamically. Supplying the validated plan here preserves
+    # its proven semantic scoring while making the real scene map fit the live inventory.
+    legacy.segment_script = planned_segmenter
+    try:
+        return _original_choose_unique_pool(title, script, live_assets, max_assets, byte_budget)
+    finally:
+        legacy.segment_script = previous_segmenter
 
 
 legacy.choose_unique_pool = choose_unique_pool_live
@@ -369,7 +438,7 @@ def download_asset(status: dict, ignored_request_id: str, ignored_token: str, it
                 url,
                 headers={
                     "X-MediaForge-Request-Token": token,
-                    "User-Agent": "MediaForge-GitHub/5.5-active-gta-vi-preflight",
+                    "User-Agent": "MediaForge-GitHub/5.6-active-gta-vi-preflight",
                 },
             )
             with urllib.request.urlopen(request, timeout=1800) as source, part.open("wb") as target:
