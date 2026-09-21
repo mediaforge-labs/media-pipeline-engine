@@ -5,6 +5,7 @@ import argparse
 import collections
 import json
 import pathlib
+import subprocess
 from typing import Any
 
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi')
@@ -46,8 +47,6 @@ def collect_scene_usage(node: Any, output: list[str]) -> None:
         keys = set(node)
         identity = identity_from_dict(node)
         if identity and len(keys & SCENE_MARKERS) >= 1:
-            # Count the scene record once and stop descending into nested metadata for
-            # that same scene, otherwise the same source can be counted twice falsely.
             output.append(identity)
             return
         for value in node.values():
@@ -72,6 +71,8 @@ def validate_selection(selection_path: pathlib.Path) -> tuple[dict[str, Any], li
 
     if selection.get('reuse_allowed') is not False:
         raise SystemExit('selection manifest does not enforce reuse_allowed=false')
+    if selection.get('scope') != 'gta-vi-owner-curated-only':
+        raise SystemExit(f"selection scope is not owner-curated GTA VI: {selection.get('scope')}")
     if selected < required or required < 1:
         raise SystemExit(f'unique media pool is insufficient: selected={selected}, required={required}')
     if not ids:
@@ -88,7 +89,76 @@ def validate_selection(selection_path: pathlib.Path) -> tuple[dict[str, Any], li
         'selected_unique_assets': selected,
         'required_unique_assets': required,
         'mapped_segments': len(ids),
+        'scope': selection.get('scope'),
     }, ids)
+
+
+def ffprobe(path: pathlib.Path) -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'stream=index,codec_type,codec_name,width,height:format=duration',
+            '-of', 'json', str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=90,
+    )
+    payload = json.loads(result.stdout or '{}')
+    duration = float((payload.get('format') or {}).get('duration') or 0.0)
+    streams = payload.get('streams') or []
+    return {'duration': duration, 'streams': streams}
+
+
+def validate_long_form(path: pathlib.Path, narration_seconds: float) -> dict[str, Any]:
+    probe = ffprobe(path)
+    video_streams = [s for s in probe['streams'] if s.get('codec_type') == 'video']
+    audio_streams = [s for s in probe['streams'] if s.get('codec_type') == 'audio']
+    if not video_streams:
+        raise SystemExit('long-form output has no decodable video stream')
+    if not audio_streams:
+        raise SystemExit('long-form output has no audio stream')
+    width = int(video_streams[0].get('width') or 0)
+    height = int(video_streams[0].get('height') or 0)
+    duration = float(probe['duration'])
+    if width < 1280 or height < 720 or width <= height:
+        raise SystemExit(f'long-form geometry is invalid: {width}x{height}')
+    if duration < 60:
+        raise SystemExit(f'long-form duration is unexpectedly short: {duration:.2f}s')
+    if narration_seconds > 0:
+        ratio = duration / narration_seconds
+        if ratio < 0.90 or ratio > 1.15:
+            raise SystemExit(
+                f'long-form duration diverges from narration: video={duration:.2f}s narration={narration_seconds:.2f}s ratio={ratio:.3f}'
+            )
+    return {
+        'width': width,
+        'height': height,
+        'duration_seconds': duration,
+        'video_codec': video_streams[0].get('codec_name'),
+        'audio_codec': audio_streams[0].get('codec_name'),
+    }
+
+
+def validate_short(path: pathlib.Path) -> dict[str, Any]:
+    if path.stat().st_size < 50_000:
+        raise SystemExit(f'Short output is unexpectedly small: {path}')
+    probe = ffprobe(path)
+    video_streams = [s for s in probe['streams'] if s.get('codec_type') == 'video']
+    audio_streams = [s for s in probe['streams'] if s.get('codec_type') == 'audio']
+    if not video_streams:
+        raise SystemExit(f'Short has no video stream: {path}')
+    if not audio_streams:
+        raise SystemExit(f'Short has no audio stream: {path}')
+    width = int(video_streams[0].get('width') or 0)
+    height = int(video_streams[0].get('height') or 0)
+    duration = float(probe['duration'])
+    if width < 1 or height < 1 or height <= width:
+        raise SystemExit(f'Short is not vertical: {path} {width}x{height}')
+    if duration <= 0 or duration > 180:
+        raise SystemExit(f'Short duration is invalid: {path} {duration:.2f}s')
+    return {'file': path.name, 'width': width, 'height': height, 'duration_seconds': duration}
 
 
 def main() -> None:
@@ -115,10 +185,16 @@ def main() -> None:
     metrics = manifest.get('metrics') or {}
     if int(metrics.get('video_assets') or 0) < 1:
         raise SystemExit('render manifest reports no video assets')
+    music_tracks = int(metrics.get('music_tracks') or 0)
+    if music_tracks != 0:
+        raise SystemExit(f'production contract requires music disabled, got music_tracks={music_tracks}')
+    narration_seconds = float(metrics.get('narration_seconds') or 0.0)
+    if narration_seconds <= 0:
+        raise SystemExit('render manifest reports invalid narration duration')
 
     shorts = sorted((root / 'shorts').glob('short-*.mp4'))
-    if args.require_five_shorts and len(shorts) < 5:
-        raise SystemExit(f'expected at least 5 Shorts, got {len(shorts)}')
+    if args.require_five_shorts and len(shorts) != 5:
+        raise SystemExit(f'expected exactly 5 Shorts, got {len(shorts)}')
 
     selection_result = None
     selection_usage: list[str] = []
@@ -130,12 +206,6 @@ def main() -> None:
     collect_scene_usage(media_manifest, usage)
     verification_source = 'media_manifest'
 
-    # Some versions of the encrypted renderer intentionally emit a compact media
-    # manifest without the source asset on every scene. In that case the semantic
-    # selection manifest is the authoritative per-scene mapping. It has already
-    # been checked above for reuse_allowed=false, complete scene coverage and unique
-    # asset IDs, so using it here preserves the strict no-reuse guarantee instead
-    # of rejecting an otherwise valid completed render.
     if not usage:
         if selection_usage:
             usage = selection_usage
@@ -154,17 +224,22 @@ def main() -> None:
         sample = list(repeated.items())[:10]
         raise SystemExit(f'RENDER INVALID: source video reused across scenes: {sample}')
 
+    long_form_probe = validate_long_form(longform, narration_seconds)
+    short_probes = [validate_short(path) for path in shorts]
+
     print(json.dumps({
         'status': 'validated',
         'long_form_bytes': longform.stat().st_size,
+        'long_form': long_form_probe,
         'shorts': len(shorts),
+        'short_probes': short_probes,
         'scene_media_uses': len(usage),
         'unique_scene_media': len(counts),
         'duplicates': 0,
         'media_verification_source': verification_source,
         'selection': selection_result,
-        'music_tracks': metrics.get('music_tracks'),
-        'narration_seconds': metrics.get('narration_seconds'),
+        'music_tracks': music_tracks,
+        'narration_seconds': narration_seconds,
     }, ensure_ascii=False))
 
 
