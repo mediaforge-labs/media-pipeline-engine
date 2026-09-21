@@ -84,8 +84,9 @@ def apply_runtime_source_hardening(core_dir: pathlib.Path) -> dict[str, int]:
             if "threadpoolexecutor" in lower or "processpoolexecutor" in lower or "as_completed" in lower:
                 stats["tts_parallel_sources"] += 1
 
-        # v7 inherited a soft reuse penalty. A used source must instead be removed from
-        # candidacy completely. This patch affects only the decrypted temporary copy.
+        # Older private cores used a soft reuse penalty. If that implementation is
+        # present, harden it in-place. Newer cores may consume an already-unique
+        # external selection manifest instead; that path is verified separately below.
         if "use_counts" in text and "relative_path" in text:
             stats["unique_media_sources"] += 1
             pattern = re.compile(
@@ -130,6 +131,99 @@ def apply_runtime_source_hardening(core_dir: pathlib.Path) -> dict[str, int]:
     return stats
 
 
+def verify_external_unique_media_guard() -> dict[str, object]:
+    """Verify the Dell selector proof used by the current V7 production core.
+
+    The public Dell selector creates an immutable local pool plus a semantic segment map
+    before the private core starts. This is a valid strict no-reuse boundary even when
+    the private core no longer contains the legacy ``use_counts`` selector that older
+    bundles used. The final render validator still checks actual per-scene usage again.
+    """
+    root_raw = os.environ.get("MEDIAFORGE_VIDEO_LIBRARY_ROOT", "").strip()
+    result: dict[str, object] = {
+        "verified": False,
+        "root_present": False,
+        "selection_present": False,
+        "catalog_present": False,
+        "selected_unique_assets": 0,
+        "required_unique_assets": 0,
+        "mapped_segments": 0,
+        "catalog_assets": 0,
+        "scope": None,
+    }
+    if not root_raw:
+        return result
+
+    root = pathlib.Path(root_raw)
+    result["root_present"] = root.is_dir()
+    if not root.is_dir():
+        return result
+
+    selection_path = root / "mediaforge-selection.json"
+    catalog_path = root / "Catalogo geral.json"
+    result["selection_present"] = selection_path.is_file()
+    result["catalog_present"] = catalog_path.is_file()
+    if not selection_path.is_file() or not catalog_path.is_file():
+        return result
+
+    try:
+        selection = json.loads(selection_path.read_text(encoding="utf-8"))
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return result
+
+    selected = int(selection.get("downloaded_unique_assets") or selection.get("selected_unique_assets") or 0)
+    required = int(selection.get("required_unique_assets") or 0)
+    segments = selection.get("segments") or []
+    semantic_rows = [
+        row for row in (selection.get("segment_asset_map") or [])
+        if isinstance(row, dict) and row.get("segment_index") is not None
+    ]
+    mapped_ids = [str(row.get("asset_id") or "").strip() for row in semantic_rows]
+    mapped_ids = [value for value in mapped_ids if value]
+    assets = [row for row in (catalog.get("assets") or []) if isinstance(row, dict)]
+    catalog_ids = [str(row.get("asset_id") or "").strip() for row in assets]
+    local_names = [str(row.get("local_name") or "").strip() for row in assets]
+
+    result.update({
+        "selected_unique_assets": selected,
+        "required_unique_assets": required,
+        "mapped_segments": len(mapped_ids),
+        "catalog_assets": len(assets),
+        "scope": selection.get("scope"),
+    })
+
+    if selection.get("reuse_allowed") is not False:
+        return result
+    if selection.get("scope") != "gta-vi-owner-curated-only":
+        return result
+    if selected < required or required < 1:
+        return result
+    if len(mapped_ids) != len(set(mapped_ids)):
+        return result
+    if segments and len(mapped_ids) != len(segments):
+        return result
+    if len(assets) != selected:
+        return result
+    if not catalog_ids or len(catalog_ids) != len(set(catalog_ids)):
+        return result
+    if not local_names or len(local_names) != len(set(local_names)):
+        return result
+
+    for name in local_names:
+        path = root / name
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root.resolve())
+        except Exception:
+            return result
+        if not resolved.is_file() or resolved.stat().st_size <= 0:
+            return result
+
+    result["verified"] = True
+    return result
+
+
 def verify_runtime_hardening(stats: dict[str, int]) -> None:
     """Fail before TTS/render unless strict guarantees are actually present."""
     strict_unique = enabled("MEDIAFORGE_STRICT_UNIQUE_MEDIA", True)
@@ -139,14 +233,23 @@ def verify_runtime_hardening(stats: dict[str, int]) -> None:
     if stats["python_sources"] < 1 or stats["syntax_verified_sources"] != stats["python_sources"]:
         errors.append("not every private Python source passed post-hardening syntax validation")
 
-    if strict_unique:
-        if stats["unique_media_sources"] < 1:
-            errors.append("no private media selector containing use_counts/relative_path was found")
-        if stats["unique_media_patches"] < 1:
-            errors.append("strict no-reuse guard was not injected into the private media selector")
+    private_unique_guard = stats["unique_media_sources"] >= 1 and stats["unique_media_patches"] >= 1
+    external_unique_guard = verify_external_unique_media_guard() if strict_unique else {"verified": False}
+
+    if strict_unique and not private_unique_guard and not bool(external_unique_guard.get("verified")):
+        errors.append(
+            "strict no-reuse proof missing: neither a hardened private selector nor a verified external unique-media manifest was found"
+        )
 
     if strict_tts and stats["tts_sources_seen"] < 1:
         errors.append("no private TTS/chunk source was found for ordered-audio verification")
+
+    if private_unique_guard:
+        unique_mode = "private_core_guard"
+    elif bool(external_unique_guard.get("verified")):
+        unique_mode = "external_selection_guard"
+    else:
+        unique_mode = "missing"
 
     payload = {
         "runtime_hardening": {
@@ -155,6 +258,8 @@ def verify_runtime_hardening(stats: dict[str, int]) -> None:
             "strict_tts_chunk_order": strict_tts,
             "ordered_future_guard": strict_tts,
             "natural_filesystem_order_guard": strict_tts,
+            "unique_media_enforcement": unique_mode,
+            "external_unique_media": external_unique_guard,
             "verified": not errors,
         }
     }
