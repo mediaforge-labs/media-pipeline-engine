@@ -24,14 +24,18 @@ jobs:
           from pathlib import Path
           p = Path('.github/workflows/media-dell-canary.yml')
           s = p.read_text()
-          validate = '''      - name: Validate complete canary and forbid reused source video\n        run: |\n          set -euo pipefail\n          python public-worker-template/validate_render.py \\\n            --root out/dell-canary \\\n            --selection .runtime/dell-assets/mediaforge-selection.json \\\n            --require-five-shorts\n\n'''
-          upload = '''      - name: Upload complete canary artifact\n        uses: actions/upload-artifact@v4\n        with:\n          name: mediaforge-dell-canary-${{ github.run_id }}\n          path: |\n            out/dell-canary/video/long-form.mp4\n            out/dell-canary/shorts/*.mp4\n            out/dell-canary/audio/narration.wav\n            out/dell-canary/audio/music-plan.json\n            out/dell-canary/captions/long-form.srt\n            out/dell-canary/media/manifest.json\n            out/dell-canary/manifest.json\n            .runtime/dell-assets/mediaforge-selection.json\n          compression-level: 0\n          retention-days: 2\n          if-no-files-found: error\n\n'''
-          if validate not in s or upload not in s:
-              raise SystemExit('expected validator/upload blocks not found')
-          if s.index(upload) < s.index(validate):
+          validate_marker = '      - name: Validate complete canary and forbid reused source video\n'
+          upload_marker = '      - name: Upload complete canary artifact\n'
+          delete_marker = '      - name: Delete temporary Dell copies from runner\n'
+          vi = s.index(validate_marker)
+          ui = s.index(upload_marker)
+          di = s.index(delete_marker)
+          if ui < vi:
               print('already fixed')
           else:
-              s = s.replace(validate + upload, upload + validate, 1)
+              validate_block = s[vi:ui]
+              upload_block = s[ui:di]
+              s = s[:vi] + upload_block + validate_block + s[di:]
               p.write_text(s)
               print('moved artifact upload before final validation')
           PY
