@@ -24,16 +24,29 @@ jobs:
           github-token: ${{ github.token }}
       - name: Extract frames
         run: |
-          set -e
-          VIDEO=canary15/video/long-form.mp4
-          test -s "$VIDEO"
-          mkdir inspect
-          ffmpeg -y -loglevel error -ss 60 -i "$VIDEO" -frames:v 1 inspect/frame-60s.jpg
-          ffmpeg -y -loglevel error -ss 180 -i "$VIDEO" -frames:v 1 inspect/frame-180s.jpg
-          ffmpeg -y -loglevel error -ss 300 -i "$VIDEO" -frames:v 1 inspect/frame-300s.jpg || true
-          cp canary15/manifest.json inspect/manifest.json
-          cp canary15/media/manifest.json inspect/media-manifest.json
-          find canary15/shorts -type f -name '*.mp4' -printf '%f\n' | sort > inspect/shorts.txt
+          set -euo pipefail
+          VIDEO="$(find canary15 -type f -path '*/video/long-form.mp4' -print -quit)"
+          test -n "$VIDEO" && test -s "$VIDEO"
+          ROOT="$(dirname "$(dirname "$VIDEO")")"
+          mkdir -p inspect
+          DURATION="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$VIDEO")"
+          python - "$DURATION" > inspect/timestamps.txt <<'PY'
+          import sys
+          d=float(sys.argv[1])
+          for f in (0.1,0.5,0.9):
+              print(max(1, min(d-1, d*f)))
+          PY
+          i=0
+          while read -r ts; do
+            i=$((i+1))
+            ffmpeg -y -loglevel error -ss "$ts" -i "$VIDEO" -frames:v 1 "inspect/frame-${i}.jpg"
+          done < inspect/timestamps.txt
+          MANIFEST="$(find "$ROOT" -maxdepth 2 -type f -name manifest.json -print | head -1)"
+          [ -n "$MANIFEST" ] && cp "$MANIFEST" inspect/manifest.json || true
+          MEDIA_MANIFEST="$(find "$ROOT" -type f -path '*/media/manifest.json' -print -quit)"
+          [ -n "$MEDIA_MANIFEST" ] && cp "$MEDIA_MANIFEST" inspect/media-manifest.json || true
+          find "$ROOT" -type f -path '*/shorts/*.mp4' -printf '%f\n' | sort > inspect/shorts.txt
+          printf 'video=%s\nduration=%s\nroot=%s\n' "$VIDEO" "$DURATION" "$ROOT" > inspect/inspection.txt
       - name: Upload inspection
         uses: actions/upload-artifact@v4
         with:
