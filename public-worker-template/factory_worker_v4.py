@@ -14,7 +14,7 @@ APPROVED_WATERMARK_URL = (
     "https://rhddgfvtrkmusbvphnlg.supabase.co/storage/v1/object/public/"
     "blog-images/social-assets/leonidanos-logo.png"
 )
-WATERMARK_RENDER_VERSION = "mediaforge-github-v10-strict-watermarked"
+WATERMARK_RENDER_VERSION = "mediaforge-github-v10-strict-watermarked-shorts-v2"
 
 # Importing factory_worker_v3_resilient above installs the resilient uploader.
 _ORIGINAL_STORAGE_UPLOAD = base.storage_upload
@@ -85,12 +85,14 @@ def apply_approved_watermark(video_path: pathlib.Path) -> None:
     if not output_path.is_file() or output_path.stat().st_size <= 0:
         raise RuntimeError("Watermarked MediaForge output was not produced")
     output_path.replace(video_path)
-    marker.write_text("approved-leonidanos-watermark-v1\n", encoding="utf-8")
+    marker.write_text("approved-leonidanos-watermark-v2\n", encoding="utf-8")
 
 
 def storage_upload(client, local_path: pathlib.Path, storage_path: str) -> str:
     local_path = pathlib.Path(local_path)
-    if local_path.name == "long-form.mp4" and storage_path.endswith("/long-form.mp4"):
+    is_long_form = local_path.name == "long-form.mp4" and storage_path.endswith("/long-form.mp4")
+    is_short = local_path.suffix.lower() == ".mp4" and "/shorts/" in storage_path
+    if is_long_form or is_short:
         apply_approved_watermark(local_path)
     return _ORIGINAL_STORAGE_UPLOAD(client, local_path, storage_path)
 
