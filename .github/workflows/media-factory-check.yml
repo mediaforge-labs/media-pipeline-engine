@@ -84,6 +84,10 @@ jobs:
           grep -q "scope') != 'gta-vi-owner-curated-only'" public-worker-template/validate_render.py
           grep -q 'expected exactly 5 Shorts' public-worker-template/validate_render.py
           grep -q 'music_tracks != 0' public-worker-template/validate_render.py
+          grep -q 'catalog_availability_preflight' public-worker-template/dell_asset_client_v5.py
+          grep -q 'Range.*bytes=0-0' public-worker-template/dell_asset_client_v5.py
+          grep -q 'ThreadPoolExecutor' public-worker-template/dell_asset_client_v5.py
+          grep -q 'Live GTA VI asset inventory is insufficient before TTS/render' public-worker-template/dell_asset_client_v5.py
 
       - name: Validate transient retry classifier without importing production dependencies
         run: |
@@ -102,6 +106,52 @@ jobs:
           assert not f("Duplicate assets detected in semantic media map")
           assert not f("Factory job has no usable TTS script")
           print('retry_classifier_ok')
+          PY
+
+      - name: Prove semantic selection cannot shrink below live unique inventory
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast, pathlib
+          p=pathlib.Path('public-worker-template/dell_asset_client_v5.py')
+          tree=ast.parse(p.read_text())
+          fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='choose_unique_pool_live')
+
+          class Legacy:
+              @staticmethod
+              def segment_script(script):
+                  return ['scene-a', 'scene-b', 'scene-c']
+
+          state={'live': [{'asset_id':'a'}, {'asset_id':'b'}]}
+          def live_catalog(assets):
+              live=list(state['live'])
+              stale=[str(x['asset_id']) for x in assets if x not in live]
+              return live, stale
+          calls=[]
+          def chooser(title, script, assets, max_assets, byte_budget):
+              calls.append(list(assets))
+              return 'selected'
+
+          ns={
+              'legacy': Legacy(),
+              '_live_catalog_assets': live_catalog,
+              '_original_choose_unique_pool': chooser,
+          }
+          exec(compile(ast.Module(body=[fn], type_ignores=[]), str(p), 'exec'), ns)
+          choose=ns['choose_unique_pool_live']
+          catalog=[{'asset_id':'a'}, {'asset_id':'b'}, {'asset_id':'c'}, {'asset_id':'d'}]
+          try:
+              choose('title', 'one two three', catalog, 180, 10_000_000)
+          except SystemExit as exc:
+              text=str(exc)
+              assert 'live=2' in text and 'required=3' in text and 'reuse remains disabled' in text
+          else:
+              raise AssertionError('selector silently accepted insufficient live inventory')
+
+          state['live']=[{'asset_id':'a'}, {'asset_id':'b'}, {'asset_id':'c'}]
+          assert choose('title', 'one two three', catalog, 180, 10_000_000) == 'selected'
+          assert len(calls)==1 and len(calls[0])==3
+          print('live_inventory_selection_gate_ok')
           PY
 
       - name: Exercise final media validator with real decodable fixtures
