@@ -104,12 +104,12 @@ jobs:
         run: |
           set -euo pipefail
           RUN_ID='${{ steps.target.outputs.run_id }}'
-          mkdir -p .self-heal/logs
+          mkdir -p self-heal-diagnostics/logs
 
-          gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?filter=latest&per_page=100" > .self-heal/jobs.json
-          jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | [.id,.name,.conclusion] | @tsv' .self-heal/jobs.json > .self-heal/failed-jobs.tsv
+          gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?filter=latest&per_page=100" > self-heal-diagnostics/jobs.json
+          jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | [.id,.name,.conclusion] | @tsv' self-heal-diagnostics/jobs.json > self-heal-diagnostics/failed-jobs.tsv
 
-          if [ ! -s .self-heal/failed-jobs.tsv ]; then
+          if [ ! -s self-heal-diagnostics/failed-jobs.tsv ]; then
             echo 'has_failed_jobs=false' >> "$GITHUB_OUTPUT"
             echo 'No failed jobs were returned for this run.'
             exit 0
@@ -123,10 +123,10 @@ jobs:
               echo "JOB_NAME=$JOB_NAME"
               echo "JOB_CONCLUSION=$JOB_CONCLUSION"
               gh api -H 'Accept: application/vnd.github+json' "repos/$REPO/actions/jobs/$JOB_ID/logs" || true
-            } > ".self-heal/logs/${JOB_ID}-${SAFE_NAME}.log" 2>&1
-          done < .self-heal/failed-jobs.tsv
+            } > "self-heal-diagnostics/logs/${JOB_ID}-${SAFE_NAME}.log" 2>&1
+          done < self-heal-diagnostics/failed-jobs.tsv
 
-          cat .self-heal/logs/*.log > .self-heal/all-failed.log || true
+          cat self-heal-diagnostics/logs/*.log > self-heal-diagnostics/all-failed.log || true
 
       - name: Classify failure
         if: ${{ steps.collect.outputs.has_failed_jobs == 'true' }}
@@ -140,7 +140,7 @@ jobs:
           from pathlib import Path
           import os, re
 
-          text = Path('.self-heal/all-failed.log').read_text(encoding='utf-8', errors='ignore').lower()
+          text = Path('self-heal-diagnostics/all-failed.log').read_text(encoding='utf-8', errors='ignore').lower()
           attempt = int(os.environ.get('RUN_ATTEMPT') or '1')
 
           fatal_patterns = {
@@ -201,7 +201,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mediaforge-failure-${{ steps.target.outputs.run_id }}-attempt-${{ steps.target.outputs.run_attempt }}
-          path: .self-heal/
+          path: self-heal-diagnostics/
           retention-days: 7
           compression-level: 6
           if-no-files-found: error
