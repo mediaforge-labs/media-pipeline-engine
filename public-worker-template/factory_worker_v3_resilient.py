@@ -6,10 +6,10 @@ import pathlib
 
 import factory_worker_v2 as base
 import factory_worker_v3 as impl
-import supabase_tus
+import supabase_chunked
 
 _ORIGINAL_STORAGE_UPLOAD = base.storage_upload
-TUS_UPLOAD_THRESHOLD = 64 * 1024 * 1024
+CHUNKED_UPLOAD_THRESHOLD = 40 * 1024 * 1024
 
 
 def resilient_storage_upload(client, local_path: pathlib.Path, storage_path: str) -> str:
@@ -18,17 +18,15 @@ def resilient_storage_upload(client, local_path: pathlib.Path, storage_path: str
         raise RuntimeError(f"Output file missing: {local_path}")
 
     size = local_path.stat().st_size
-    if size <= TUS_UPLOAD_THRESHOLD:
+    if size <= CHUNKED_UPLOAD_THRESHOLD:
         return _ORIGINAL_STORAGE_UPLOAD(client, local_path, storage_path)
 
     content_type = mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"
-    return supabase_tus.upload_file(
+    return supabase_chunked.upload_file(
         local_path,
         bucket=base.SUPABASE_BUCKET,
-        object_path=storage_path,
+        storage_path=storage_path,
         content_type=content_type,
-        cache_control="3600",
-        upsert=True,
     )
 
 
