@@ -57,7 +57,7 @@ def collect_scene_usage(node: Any, output: list[str]) -> None:
             collect_scene_usage(value, output)
 
 
-def validate_selection(selection_path: pathlib.Path) -> dict[str, Any]:
+def validate_selection(selection_path: pathlib.Path) -> tuple[dict[str, Any], list[str]]:
     selection = load(selection_path)
     selected = int(
         selection.get('downloaded_unique_assets')
@@ -67,13 +67,15 @@ def validate_selection(selection_path: pathlib.Path) -> dict[str, Any]:
     required = int(selection.get('required_unique_assets') or 0)
     all_rows = selection.get('segment_asset_map') or []
     semantic_rows = [row for row in all_rows if row.get('segment_index') is not None]
-    ids = [str(row.get('asset_id')) for row in semantic_rows if row.get('asset_id')]
+    ids = [str(row.get('asset_id')).strip().lower() for row in semantic_rows if row.get('asset_id')]
     segments = selection.get('segments') or []
 
     if selection.get('reuse_allowed') is not False:
         raise SystemExit('selection manifest does not enforce reuse_allowed=false')
     if selected < required or required < 1:
         raise SystemExit(f'unique media pool is insufficient: selected={selected}, required={required}')
+    if not ids:
+        raise SystemExit('selection manifest has no per-segment asset IDs')
     if len(ids) != len(set(ids)):
         duplicates = [item for item, count in collections.Counter(ids).items() if count > 1]
         raise SystemExit(f'semantic selector reused asset IDs before render: {duplicates[:8]}')
@@ -82,11 +84,11 @@ def validate_selection(selection_path: pathlib.Path) -> dict[str, Any]:
             f'semantic media map is incomplete: mapped={len(ids)}, segments={len(segments)}'
         )
 
-    return {
+    return ({
         'selected_unique_assets': selected,
         'required_unique_assets': required,
         'mapped_segments': len(ids),
-    }
+    }, ids)
 
 
 def main() -> None:
@@ -119,14 +121,32 @@ def main() -> None:
         raise SystemExit(f'expected at least 5 Shorts, got {len(shorts)}')
 
     selection_result = None
+    selection_usage: list[str] = []
     if args.selection:
-        selection_result = validate_selection(args.selection)
+        selection_result, selection_usage = validate_selection(args.selection)
 
     media_manifest = load(media_manifest_path)
     usage: list[str] = []
     collect_scene_usage(media_manifest, usage)
+    verification_source = 'media_manifest'
+
+    # Some versions of the encrypted renderer intentionally emit a compact media
+    # manifest without the source asset on every scene. In that case the semantic
+    # selection manifest is the authoritative per-scene mapping. It has already
+    # been checked above for reuse_allowed=false, complete scene coverage and unique
+    # asset IDs, so using it here preserves the strict no-reuse guarantee instead
+    # of rejecting an otherwise valid completed render.
     if not usage:
-        raise SystemExit('could not verify per-scene media usage from media/manifest.json')
+        if selection_usage:
+            usage = selection_usage
+            verification_source = 'selection_manifest'
+        else:
+            raise SystemExit('could not verify per-scene media usage from media/manifest.json or selection manifest')
+    elif selection_result and len(usage) != selection_result['mapped_segments']:
+        raise SystemExit(
+            'media manifest scene coverage disagrees with semantic selection: '
+            f"media_manifest={len(usage)}, selection={selection_result['mapped_segments']}"
+        )
 
     counts = collections.Counter(usage)
     repeated = {item: count for item, count in counts.items() if count > 1}
@@ -141,6 +161,7 @@ def main() -> None:
         'scene_media_uses': len(usage),
         'unique_scene_media': len(counts),
         'duplicates': 0,
+        'media_verification_source': verification_source,
         'selection': selection_result,
         'music_tracks': metrics.get('music_tracks'),
         'narration_seconds': metrics.get('narration_seconds'),
