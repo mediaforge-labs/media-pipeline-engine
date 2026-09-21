@@ -102,9 +102,11 @@ jobs:
             public-worker-template/factory_worker_v3.py \
             public-worker-template/factory_worker_v3_resilient.py \
             public-worker-template/factory_worker_v4.py \
+            public-worker-template/factory_worker_v5.py \
             public-worker-template/supabase_chunked.py \
             public-worker-template/dell_asset_client.py \
             public-worker-template/dell_asset_client_v5.py \
+            public-worker-template/dell_asset_client_v6.py \
             public-worker-template/worker.py \
             public-worker-template/worker_v2.py \
             public-worker-template/validate_render.py
@@ -166,7 +168,7 @@ jobs:
           set -euo pipefail
           test -n "$SUPABASE_SECRET_KEY" || { echo "SUPABASE_SECRET_KEY is not configured"; exit 1; }
           test -n "$MEDIAFORGE_CORE_KEY_B64" || { echo "MEDIAFORGE_CORE_KEY_B64 is not configured"; exit 1; }
-          python public-worker-template/factory_worker_v4.py \
+          python public-worker-template/factory_worker_v5.py \
             --lane "${{ matrix.lane }}" \
             --locale "${{ matrix.locale }}" \
             --bundle "$MEDIAFORGE_BUNDLE_PATH" \
