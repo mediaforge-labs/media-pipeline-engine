@@ -122,10 +122,11 @@ jobs:
 
           for i in 1 2 3 4 5; do
             ffmpeg -y -loglevel error \
-              -f lavfi -i "color=c=black:s=360x640:r=10:d=2" \
-              -f lavfi -i "sine=frequency=$((440+i*20)):sample_rate=24000:duration=2" \
+              -f lavfi -i "testsrc2=s=360x640:r=15:d=6" \
+              -f lavfi -i "sine=frequency=$((440+i*20)):sample_rate=24000:duration=6" \
               -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac \
               "$ROOT/shorts/short-0${i}.mp4"
+            test "$(stat -c%s "$ROOT/shorts/short-0${i}.mp4")" -ge 50000
           done
 
           python - <<'PY'
@@ -140,9 +141,7 @@ jobs:
               'required_unique_assets': 5,
               'reuse_allowed': False,
               'segments': [{'segment_index': i} for i in range(5)],
-              'segment_asset_map': [
-                  {'segment_index': i, 'asset_id': f'asset-{i}'} for i in range(5)
-              ],
+              'segment_asset_map': [{'segment_index': i, 'asset_id': f'asset-{i}'} for i in range(5)],
           }
           pathlib.Path('.runtime/validator-selection.json').write_text(json.dumps(selection))
           PY
