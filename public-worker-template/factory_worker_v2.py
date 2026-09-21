@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import pathlib
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -13,7 +14,7 @@ from datetime import datetime, timezone
 import boto3
 import requests
 from botocore.client import Config
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import ClientError
 
 SUPABASE_BUCKET = "mediaforge-assets"
 SUPABASE_PROJECT_REF = "rhddgfvtrkmusbvphnlg"
@@ -22,6 +23,7 @@ SUPABASE_S3_ENDPOINT = f"https://{SUPABASE_PROJECT_REF}.storage.supabase.co/stor
 RENDER_VERSION = "mediaforge-github-v9"
 PART_SIZE = 64 * 1024 * 1024
 SINGLE_PUT_LIMIT = 64 * 1024 * 1024
+MAX_FACTORY_ATTEMPTS = 3
 
 
 def required(name: str) -> str:
@@ -33,7 +35,7 @@ def required(name: str) -> str:
 
 def api_headers() -> dict[str, str]:
     key = required("SUPABASE_SECRET_KEY")
-    headers = {"apikey": key, "User-Agent": "MediaForge/1.3"}
+    headers = {"apikey": key, "User-Agent": "MediaForge/1.4"}
     if not key.startswith("sb_secret_"):
         headers["Authorization"] = f"Bearer {key}"
     return headers
@@ -57,6 +59,7 @@ def request_json(method: str, url: str, *, params=None, body=None, extra_headers
 
 
 def s3_client():
+    """Legacy compatibility only; production v4 writes through Storage REST."""
     return boto3.client(
         "s3",
         endpoint_url=SUPABASE_S3_ENDPOINT,
@@ -203,6 +206,7 @@ def multipart_put(client, local_path: pathlib.Path, key: str, content_type: str)
 
 
 def storage_upload(client, local_path: pathlib.Path, storage_path: str) -> str:
+    """Legacy S3 uploader retained for older/manual workflows only."""
     if not local_path.is_file() or local_path.stat().st_size <= 0:
         raise RuntimeError(f"Output file missing: {local_path}")
     size = local_path.stat().st_size
@@ -217,43 +221,105 @@ def storage_upload(client, local_path: pathlib.Path, storage_path: str) -> str:
     return f"supabase://{SUPABASE_BUCKET}/{storage_path}"
 
 
-def mark_failed(job: dict | None, variant: dict | None, owner: str, error: str) -> None:
-    message = error[:1800]
+def is_transient_failure(error: str) -> bool:
+    text = (error or "").lower()
+    patterns = (
+        r"connection reset",
+        r"connection aborted",
+        r"remote end closed",
+        r"temporary failure",
+        r"timed? ?out",
+        r"timeout",
+        r"too many requests",
+        r"rate limit",
+        r"http[^\n]*(408|429|500|502|503|504)",
+        r"service unavailable",
+        r"bad gateway",
+        r"gateway timeout",
+        r"connectionerror",
+        r"urlerror",
+        r"dell_asset_client_v5\.py.*returned non-zero exit status",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def mark_failed(
+    job: dict | None,
+    variant: dict | None,
+    owner: str,
+    error: str,
+    queue: dict | None = None,
+) -> None:
+    """Persist a deterministic failure or requeue a transient one safely.
+
+    A GitHub Actions rerun alone cannot heal a job after the database row has been
+    changed to `failed`, because the lease RPC only leases pending/expired-running
+    rows. Transient failures are therefore returned to `pending` here (max 3 leases),
+    with the lease cleared atomically. Deterministic failures remain failed.
+    """
+    message = (error or "unknown factory failure")[:1800]
+    retryable = bool(job) and is_transient_failure(message) and int(job.get("attempt") or 0) < MAX_FACTORY_ATTEMPTS
+    now = utcnow()
+
     if job:
         metadata = dict(job.get("metadata") or {})
         metadata["last_error"] = message
-        metadata["failed_at"] = utcnow()
+        metadata["last_failure_at"] = now
+        metadata["last_failure_retryable"] = retryable
+        payload = {
+            "status": "pending" if retryable else "failed",
+            "fallback_reason": message,
+            "last_progress_at": now,
+            "completed_at": None if retryable else now,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "selected_backend": None if retryable else job.get("selected_backend"),
+            "metadata": metadata,
+            "updated_at": now,
+        }
         try:
-            patch_rows(
+            rows = patch_rows(
                 "youtube_factory_jobs",
-                {
-                    "status": "failed",
-                    "fallback_reason": message,
-                    "last_progress_at": utcnow(),
-                    "completed_at": utcnow(),
-                    "metadata": metadata,
-                    "updated_at": utcnow(),
-                },
+                payload,
                 id=job["id"],
                 lease_owner=owner,
             )
-        except Exception:
-            pass
+            if not rows:
+                print(
+                    f"WARNING: factory failure checkpoint was not written for job {job['id']}; lease owner changed",
+                    file=sys.stderr,
+                )
+        except Exception as checkpoint_exc:
+            print(f"WARNING: could not persist factory failure state: {checkpoint_exc}", file=sys.stderr)
+
     if variant:
         try:
+            variant_payload: dict[str, object] = {"last_error": message, "updated_at": now}
+            if not retryable and not variant.get("youtube_video_id") and str(variant.get("status") or "") not in {"uploaded", "uploading"}:
+                variant_payload["status"] = "failed"
+            patch_rows("youtube_video_variants", variant_payload, id=variant["id"])
+        except Exception as checkpoint_exc:
+            print(f"WARNING: could not persist variant failure state: {checkpoint_exc}", file=sys.stderr)
+
+    if queue and job and str(job.get("locale") or "") == "pt-BR" and not queue.get("youtube_video_id"):
+        try:
+            # A PT render owns the coarse queue render state. Returning it to failed on
+            # a terminal failure prevents rows from getting stranded forever in rendering.
+            queue_status = str(queue.get("status") or "") if retryable else "failed"
             patch_rows(
-                "youtube_video_variants",
-                {"status": "failed", "last_error": message, "updated_at": utcnow()},
-                id=variant["id"],
+                "youtube_queue",
+                {"status": queue_status, "last_error": message, "updated_at": now},
+                id=queue["id"],
             )
-        except Exception:
-            pass
+        except Exception as checkpoint_exc:
+            print(f"WARNING: could not persist queue failure state: {checkpoint_exc}", file=sys.stderr)
 
 
 def run_factory(args: argparse.Namespace) -> int:
     owner = f"github:{os.environ.get('GITHUB_RUN_ID', 'local')}:{args.lane}"
     job = None
     variant = None
+    queue = None
     try:
         job = lease_job(args.locale, owner)
         if not job:
@@ -270,6 +336,7 @@ def run_factory(args: argparse.Namespace) -> int:
         if not variant:
             raise RuntimeError(f"Video variant not found for queue={job['queue_id']} locale={args.locale}")
 
+        queue_before = str(queue.get("status") or "")
         patch_rows("youtube_queue", {"status": "rendering", "updated_at": utcnow()}, id=job["queue_id"])
         runtime = pathlib.Path(args.runtime_dir)
         runtime.mkdir(parents=True, exist_ok=True)
@@ -333,7 +400,13 @@ def run_factory(args: argparse.Namespace) -> int:
         if args.locale == "pt-BR":
             patch_rows(
                 "youtube_queue",
-                {"audio_url": audio_uri, "video_url": video_uri, "last_error": None, "updated_at": utcnow()},
+                {
+                    "status": queue_before if queue_before != "rendering" else "voice_ready",
+                    "audio_url": audio_uri,
+                    "video_url": video_uri,
+                    "last_error": None,
+                    "updated_at": utcnow(),
+                },
                 id=job["queue_id"],
             )
 
@@ -346,12 +419,13 @@ def run_factory(args: argparse.Namespace) -> int:
             "render_version": RENDER_VERSION,
             "metrics": manifest.get("metrics") or {},
         }
-        patch_rows(
+        rows = patch_rows(
             "youtube_factory_jobs",
             {
                 "status": "completed",
                 "last_progress_at": utcnow(),
                 "completed_at": utcnow(),
+                "lease_owner": None,
                 "lease_expires_at": None,
                 "metadata": metadata,
                 "updated_at": utcnow(),
@@ -359,10 +433,12 @@ def run_factory(args: argparse.Namespace) -> int:
             id=job["id"],
             lease_owner=owner,
         )
+        if not rows:
+            raise RuntimeError("Factory output completed but job lease checkpoint could not be finalized")
         print(json.dumps({"status": "completed", "job_id": job["id"], "lane": args.lane, "video_url": video_uri}))
         return 0
     except Exception as exc:
-        mark_failed(job, variant, owner, str(exc))
+        mark_failed(job, variant, owner, str(exc), queue=queue)
         raise
 
 
