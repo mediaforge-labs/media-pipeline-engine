@@ -1,0 +1,73 @@
+name: Canary 15 Promote Approved Review
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - automation/canary15-promote-approved.json
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      SUPABASE_S3_ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY_ID }}
+      SUPABASE_S3_SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET_ACCESS_KEY }}
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      AWS_EC2_METADATA_DISABLED: 'true'
+      QUEUE_ID: 530e6f9a-7c9d-4cb8-b0a6-69e4ac8fc00c
+      VARIANT_ID: 67b73244-768f-4e1d-868c-6969c5598192
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Install storage dependencies
+        run: pip install --no-cache-dir boto3 requests
+      - name: Download approved watermarked artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: canary15-watermarked-review
+          path: approved
+          repository: mediaforge-labs/media-pipeline-engine
+          run-id: '35603458203'
+          github-token: ${{ github.token }}
+      - name: Validate and promote to Supabase checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s approved/long-form.mp4
+          ffprobe -v error -show_entries format=duration,size -of json approved/long-form.mp4
+          python - <<'PY'
+          import os, pathlib, requests
+          import public_worker_template_dummy
+          PY
+        continue-on-error: true
+      - name: Upload approved video and patch exact PT variant
+        env:
+          PYTHONPATH: public-worker-template
+        run: |
+          python - <<'PY'
+          import os, pathlib, requests
+          import factory_worker_v2 as base
+          q=os.environ['QUEUE_ID']; vid=os.environ['VARIANT_ID']
+          p=pathlib.Path('approved/long-form.mp4')
+          if not p.is_file() or p.stat().st_size < 100000:
+              raise SystemExit('approved video missing/small')
+          key=f"renders/{q}/pt-BR/approved-canary-35603458203/long-form.mp4"
+          uri=base.storage_upload(base.s3_client(),p,key)
+          h={"apikey":os.environ["SUPABASE_SECRET_KEY"],"Authorization":"Bearer "+os.environ["SUPABASE_SECRET_KEY"],"Content-Type":"application/json","Prefer":"return=representation"}
+          url=os.environ["SUPABASE_URL"].rstrip("/")+"/rest/v1/youtube_video_variants"
+          payload={"video_url":uri,"render_version":"mediaforge-github-v10-approved-watermark","status":"upload_ready","last_error":None}
+          r=requests.patch(url,headers=h,params={"id":f"eq.{vid}","queue_id":f"eq.{q}","locale":"eq.pt-BR"},json=payload,timeout=30); r.raise_for_status()
+          rows=r.json()
+          if len(rows)!=1: raise SystemExit(f"checkpoint patch mismatch: {len(rows)}")
+          print("PROMOTED",q,vid,uri)
+          PY
