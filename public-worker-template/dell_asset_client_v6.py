@@ -33,7 +33,7 @@ def control(action: str) -> dict:
         headers={
             "apikey": key,
             "Authorization": f"Bearer {key}",
-            "User-Agent": "MediaForge-GitHub/6.0-repository-contract",
+            "User-Agent": "MediaForge-GitHub/6.1-repository-contract",
         },
         params={"action": action},
         timeout=60,
@@ -50,17 +50,47 @@ def normalise(value: object) -> str:
     return str(value or "").replace("\\", "/").strip().lower().lstrip("./")
 
 
+def fetch_live_health(status: dict) -> dict:
+    public_url = str(status.get("public_url") or "").rstrip("/")
+    if not public_url:
+        raise SystemExit("Dell gateway public_url is empty before production")
+    try:
+        response = requests.get(
+            public_url + "/health",
+            headers={"User-Agent": "MediaForge-GitHub/6.1-repository-contract"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        health = response.json()
+    except Exception as exc:
+        raise SystemExit(f"Dell public gateway health check failed before production: {exc}") from exc
+    if not isinstance(health, dict) or health.get("ok") is not True:
+        raise SystemExit("Dell public gateway /health did not return ok=true")
+    return health
+
+
 def validate_catalog(status: dict, catalog: dict) -> None:
     if status.get("status") != "online" or not status.get("public_url"):
         raise SystemExit("Dell gateway is not online before production")
 
+    # The control-row heartbeat is eventually consistent and can become stale even while
+    # the persistent Dell gateway/tunnel is serving traffic normally. Probe the live
+    # endpoint first; a healthy v3 endpoint is authoritative for liveness. We still log
+    # whether the stored heartbeat was fresh so control-plane drift remains observable.
+    health = fetch_live_health(status)
+    if str(health.get("version") or "") != EXPECTED_GATEWAY_VERSION:
+        raise SystemExit(
+            f"Dell live gateway is obsolete: health.version={health.get('version')!r}, "
+            f"expected={EXPECTED_GATEWAY_VERSION!r}"
+        )
+
     heartbeat = str(status.get("heartbeat_at") or "")
+    heartbeat_fresh = False
     try:
         beat = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
-    except Exception as exc:
-        raise SystemExit(f"Dell gateway heartbeat is invalid: {heartbeat!r}") from exc
-    if datetime.now(timezone.utc) - beat > timedelta(minutes=2):
-        raise SystemExit("Dell gateway heartbeat is stale before production")
+        heartbeat_fresh = datetime.now(timezone.utc) - beat <= timedelta(minutes=2)
+    except Exception:
+        heartbeat_fresh = False
 
     gateway_version = str(catalog.get("gateway_version") or status.get("gateway_version") or "")
     if gateway_version != EXPECTED_GATEWAY_VERSION:
@@ -120,25 +150,6 @@ def validate_catalog(status: dict, catalog: dict) -> None:
             + "; ".join(violations)
         )
 
-    public_url = str(status["public_url"]).rstrip("/")
-    try:
-        health_response = requests.get(
-            public_url + "/health",
-            headers={"User-Agent": "MediaForge-GitHub/6.0-repository-contract"},
-            timeout=20,
-        )
-        health_response.raise_for_status()
-        health = health_response.json()
-    except Exception as exc:
-        raise SystemExit(f"Dell public gateway health check failed before production: {exc}") from exc
-
-    if health.get("ok") is not True:
-        raise SystemExit("Dell public gateway /health did not return ok=true")
-    if str(health.get("version") or "") != EXPECTED_GATEWAY_VERSION:
-        raise SystemExit(
-            f"Dell live gateway is obsolete: health.version={health.get('version')!r}, "
-            f"expected={EXPECTED_GATEWAY_VERSION!r}"
-        )
     health_count = int(health.get("catalog_assets") or 0)
     if health_count != len(assets):
         raise SystemExit(
@@ -156,6 +167,8 @@ def validate_catalog(status: dict, catalog: dict) -> None:
                 "collection": EXPECTED_COLLECTION,
                 "suffix": EXPECTED_SUFFIX,
                 "legacy_stock_allowed": False,
+                "live_health_authoritative": True,
+                "stored_heartbeat_fresh": heartbeat_fresh,
             },
             ensure_ascii=False,
         )
