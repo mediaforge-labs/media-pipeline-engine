@@ -1,0 +1,77 @@
+name: MediaForge Active Repository Contract Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - public-worker-template/dell_asset_client_v6.py
+      - public-worker-template/factory_worker_v5.py
+      - .github/workflows/media-factory.yml
+      - .github/workflows/media-repository-contract-check.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mediaforge-active-repository-contract-check
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile production entrypoints
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            public-worker-template/dell_asset_client_v6.py \
+            public-worker-template/dell_asset_client_v5.py \
+            public-worker-template/factory_worker_v5.py \
+            public-worker-template/factory_worker_v4.py \
+            public-worker-template/factory_worker_v3.py
+
+      - name: Verify workflow uses repository contract gate
+        run: |
+          set -euo pipefail
+          grep -q 'factory_worker_v5.py' .github/workflows/media-factory.yml
+          grep -q 'dell_asset_client_v6.py' public-worker-template/factory_worker_v5.py
+          grep -q '3.0-active-gta-vi' public-worker-template/dell_asset_client_v6.py
+          grep -q 'media/gta_vi-active-edit-only' public-worker-template/dell_asset_client_v6.py
+          grep -q 'media/gta_vi' public-worker-template/dell_asset_client_v6.py
+          grep -q -- '-mudo.mp4' public-worker-template/dell_asset_client_v6.py
+
+      - name: Prove repository contract rejects legacy paths and duplicate visuals
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast, pathlib
+          from datetime import datetime, timezone
+
+          p=pathlib.Path('public-worker-template/dell_asset_client_v6.py')
+          tree=ast.parse(p.read_text())
+          wanted={'normalise'}
+          nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in wanted]
+          ns={}
+          exec(compile(ast.Module(body=nodes,type_ignores=[]),str(p),'exec'),ns)
+          normalize=ns['normalise']
+          assert normalize(r'C:\\LeonidanosVideoPipeline\\media\\gta_vi\\x') == 'c:/leonidanosvideopipeline/media/gta_vi/x'
+          print('repository_path_normalisation_ok')
+          PY
+
+      - name: Verify authoritative Dell gateway catalog builder contract
+        run: |
+          set -euo pipefail
+          grep -q "ACTIVE_EDIT_SUFFIX='-mudo.mp4'" tools/dell_asset_gateway.py
+          grep -q "ACTIVE_RELATIVE_ROOT=pathlib.PurePosixPath('media/gta_vi')" tools/dell_asset_gateway.py
+          grep -q "scope':'media/gta_vi-active-edit-only'" tools/dell_asset_gateway.py
+          grep -q "visual_duplicate_count" tools/dell_asset_gateway.py
+          grep -q "quick_hash" tools/dell_asset_gateway.py
+          grep -q "Catalogo pronto:" tools/setup_dell_asset_gateway.ps1
