@@ -22,6 +22,9 @@ concurrency:
 
 jobs:
   probe:
+    # Temporary audit hold: production rendering is dispatch-only until the complete
+    # code/data/storage/upload preflight has passed.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     name: Check pending factory work
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -66,7 +69,7 @@ jobs:
 
   factory:
     needs: probe
-    if: ${{ github.event_name == 'workflow_dispatch' || needs.probe.outputs.has_work == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (needs.probe.outputs.has_work == 'true' || github.event_name == 'workflow_dispatch') }}
     name: ${{ matrix.lane }} / production
     runs-on: ubuntu-latest
     timeout-minutes: 240
