@@ -1,0 +1,77 @@
+name: MediaForge Dell Canary Resume
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Failed/succeeded Canary run that already uploaded the render checkpoint artifact
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: mediaforge-dell-canary-resume-${{ inputs.source_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  resume-validation:
+    name: Resume Canary from rendered artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout current fixed code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download rendered Canary checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: mediaforge-dell-canary-${{ inputs.source_run_id }}
+          path: .
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify checkpoint files exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s out/dell-canary/video/long-form.mp4
+          test -s out/dell-canary/manifest.json
+          test -s out/dell-canary/media/manifest.json
+          test -s .runtime/dell-assets/mediaforge-selection.json
+          test "$(find out/dell-canary/shorts -maxdepth 1 -type f -name '*.mp4' | wc -l)" -ge 5
+          echo 'Rendered checkpoint recovered; no TTS/render will run in this workflow.'
+
+      - name: Validate complete Canary with current validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          python public-worker-template/validate_render.py \
+            --root out/dell-canary \
+            --selection .runtime/dell-assets/mediaforge-selection.json \
+            --require-five-shorts
+
+      - name: Preserve revalidated checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediaforge-dell-canary-resumed-${{ inputs.source_run_id }}-${{ github.run_id }}
+          path: |
+            out/dell-canary/video/long-form.mp4
+            out/dell-canary/shorts/*.mp4
+            out/dell-canary/audio/narration.wav
+            out/dell-canary/audio/music-plan.json
+            out/dell-canary/captions/long-form.srt
+            out/dell-canary/media/manifest.json
+            out/dell-canary/manifest.json
+            .runtime/dell-assets/mediaforge-selection.json
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
