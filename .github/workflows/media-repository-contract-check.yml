@@ -48,21 +48,19 @@ jobs:
           grep -q 'media/gta_vi' public-worker-template/dell_asset_client_v6.py
           grep -q -- '-mudo.mp4' public-worker-template/dell_asset_client_v6.py
 
-      - name: Prove repository contract rejects legacy paths and duplicate visuals
+      - name: Prove repository path normalization
         run: |
           set -euo pipefail
           python - <<'PY'
           import ast, pathlib
-          from datetime import datetime, timezone
-
           p=pathlib.Path('public-worker-template/dell_asset_client_v6.py')
           tree=ast.parse(p.read_text())
-          wanted={'normalise'}
-          nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in wanted]
+          fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='normalise')
           ns={}
-          exec(compile(ast.Module(body=nodes,type_ignores=[]),str(p),'exec'),ns)
+          exec(compile(ast.Module(body=[fn],type_ignores=[]),str(p),'exec'),ns)
           normalize=ns['normalise']
-          assert normalize(r'C:\\LeonidanosVideoPipeline\\media\\gta_vi\\x') == 'c:/leonidanosvideopipeline/media/gta_vi/x'
+          assert normalize(r'C:\LeonidanosVideoPipeline\media\gta_vi\x') == 'c:/leonidanosvideopipeline/media/gta_vi/x'
+          assert normalize('media/gta_vi/cortes_por_atividade/a-mudo.mp4') == 'media/gta_vi/cortes_por_atividade/a-mudo.mp4'
           print('repository_path_normalisation_ok')
           PY
 
