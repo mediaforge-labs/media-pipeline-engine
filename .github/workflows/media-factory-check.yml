@@ -56,3 +56,37 @@ jobs:
           grep -q 'music_enabled.*False' public-worker-template/factory_worker_v3.py
           grep -q -- '--verify-only' public-worker-template/factory_worker_v3.py
           grep -q -- '--require-five-shorts' public-worker-template/factory_worker_v3.py
+
+      - name: Exercise strict selection-manifest fallback without rendering
+        run: |
+          set -euo pipefail
+          ROOT=.runtime/validator-fixture
+          SEL=.runtime/validator-selection.json
+          mkdir -p "$ROOT/video" "$ROOT/audio" "$ROOT/captions" "$ROOT/media" "$ROOT/shorts"
+          python - <<'PY'
+          import json, pathlib
+          root=pathlib.Path('.runtime/validator-fixture')
+          (root/'manifest.json').write_text(json.dumps({'metrics': {'video_assets': 5, 'music_tracks': 0, 'narration_seconds': 60}}))
+          (root/'media/manifest.json').write_text(json.dumps({'version': 'compact-no-per-scene-source'}))
+          (root/'video/long-form.mp4').write_bytes(b'0' * 100001)
+          (root/'audio/narration.wav').write_bytes(b'RIFF-test')
+          (root/'captions/long-form.srt').write_text('1\n00:00:00,000 --> 00:00:01,000\nTeste\n')
+          for i in range(1, 6):
+              (root/f'shorts/short-{i:02d}.mp4').write_bytes(b'short')
+          selection={
+              'downloaded_unique_assets': 5,
+              'required_unique_assets': 5,
+              'reuse_allowed': False,
+              'segments': [{'segment_index': i} for i in range(5)],
+              'segment_asset_map': [
+                  {'segment_index': i, 'asset_id': f'asset-{i}'} for i in range(5)
+              ],
+          }
+          pathlib.Path('.runtime/validator-selection.json').write_text(json.dumps(selection))
+          PY
+          python public-worker-template/validate_render.py \
+            --root "$ROOT" \
+            --selection "$SEL" \
+            --require-five-shorts | tee .runtime/validator-result.json
+          grep -q '"status": "validated"' .runtime/validator-result.json
+          grep -q '"media_verification_source": "selection_manifest"' .runtime/validator-result.json
