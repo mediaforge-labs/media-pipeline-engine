@@ -30,7 +30,10 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
       - name: Install storage dependencies
-        run: pip install --no-cache-dir boto3 requests
+        run: |
+          pip install --no-cache-dir boto3 requests
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Download approved watermarked artifact
         uses: actions/download-artifact@v4
         with:
@@ -39,35 +42,43 @@ jobs:
           repository: mediaforge-labs/media-pipeline-engine
           run-id: '35603458203'
           github-token: ${{ github.token }}
-      - name: Validate and promote to Supabase checkpoint
-        shell: bash
+      - name: Validate approved candidate
         run: |
           set -euo pipefail
           test -s approved/long-form.mp4
           ffprobe -v error -show_entries format=duration,size -of json approved/long-form.mp4
-          python - <<'PY'
-          import os, pathlib, requests
-          import public_worker_template_dummy
-          PY
-        continue-on-error: true
+          test -s approved/frame-0.1.jpg
+          test -s approved/frame-0.5.jpg
+          test -s approved/frame-0.9.jpg
       - name: Upload approved video and patch exact PT variant
         env:
           PYTHONPATH: public-worker-template
         run: |
           python - <<'PY'
-          import os, pathlib, requests
+          import mimetypes, os, pathlib, requests
           import factory_worker_v2 as base
+
           q=os.environ['QUEUE_ID']; vid=os.environ['VARIANT_ID']
           p=pathlib.Path('approved/long-form.mp4')
           if not p.is_file() or p.stat().st_size < 100000:
               raise SystemExit('approved video missing/small')
+
           key=f"renders/{q}/pt-BR/approved-canary-35603458203/long-form.mp4"
-          uri=base.storage_upload(base.s3_client(),p,key)
+          client=base.s3_client()
+          content_type=mimetypes.guess_type(p.name)[0] or 'video/mp4'
+          base.direct_put(client,p,key,content_type)
+          remote=base.object_size(client,key)
+          if remote != p.stat().st_size:
+              raise SystemExit(f'storage verification mismatch local={p.stat().st_size} remote={remote}')
+          uri=f"supabase://{base.SUPABASE_BUCKET}/{key}"
+
           h={"apikey":os.environ["SUPABASE_SECRET_KEY"],"Authorization":"Bearer "+os.environ["SUPABASE_SECRET_KEY"],"Content-Type":"application/json","Prefer":"return=representation"}
-          url=os.environ["SUPABASE_URL"].rstrip("/")+"/rest/v1/youtube_video_variants"
+          url=os.environ["SUPABASE_URL"].rstrip('/')+'/rest/v1/youtube_video_variants'
           payload={"video_url":uri,"render_version":"mediaforge-github-v10-approved-watermark","status":"upload_ready","last_error":None}
-          r=requests.patch(url,headers=h,params={"id":f"eq.{vid}","queue_id":f"eq.{q}","locale":"eq.pt-BR"},json=payload,timeout=30); r.raise_for_status()
+          r=requests.patch(url,headers=h,params={"id":f"eq.{vid}","queue_id":f"eq.{q}","locale":"eq.pt-BR"},json=payload,timeout=30)
+          r.raise_for_status()
           rows=r.json()
-          if len(rows)!=1: raise SystemExit(f"checkpoint patch mismatch: {len(rows)}")
-          print("PROMOTED",q,vid,uri)
+          if len(rows)!=1:
+              raise SystemExit(f'checkpoint patch mismatch: {len(rows)}')
+          print('PROMOTED',q,vid,uri,remote)
           PY
