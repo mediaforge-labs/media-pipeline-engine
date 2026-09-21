@@ -46,6 +46,8 @@ function Clear-S3Env(){
 }
 
 if(!(Test-Path $Root -PathType Container)){ throw "Biblioteca nao encontrada: $Root" }
+$activeRoot=Join-Path $Root 'media\gta_vi'
+if(!(Test-Path $activeRoot -PathType Container)){ throw "Colecao ativa GTA VI nao encontrada: $activeRoot" }
 $py=Get-Command python -ErrorAction SilentlyContinue
 if(!$py){$py=Get-Command py -ErrorAction SilentlyContinue}
 if(!$py){throw 'Python nao encontrado.'}
@@ -63,7 +65,6 @@ if((Test-Path $a) -and (Test-Path $s)){
     if($LASTEXITCODE -eq 0){
       $valid=$true
       Write-Host 'Credenciais S3 locais validadas.'
-      # Regrava no formato sem CR/LF para curar arquivos antigos.
       $sa=ConvertTo-SecureString -String $access -AsPlainText -Force
       $ss=ConvertTo-SecureString -String $secret -AsPlainText -Force
       Save-SecureFile $sa $a
@@ -107,7 +108,7 @@ $runner=Join-Path $Repo 'tools\run_dell_asset_gateway.ps1'
 if(!(Test-Path $gatewayPy)){ throw "Arquivo nao encontrado: $gatewayPy. Rode git pull." }
 if(!(Test-Path $runner)){ throw "Arquivo nao encontrado: $runner. Rode git pull." }
 
-Write-Host 'Atualizando catalogo metadata-only via S3...'
+Write-Host 'Atualizando catalogo metadata-only da colecao ativa media\gta_vi...'
 & $py.Source $gatewayPy --root $Root --catalog-file $catalog --sync-catalog
 if($LASTEXITCODE -ne 0){ Clear-S3Env; throw 'Catalogacao falhou.' }
 if(!(Test-Path $catalog -PathType Leaf)){ Clear-S3Env; throw 'Catalogo local nao foi criado.' }
@@ -115,14 +116,22 @@ if(!(Test-Path $catalog -PathType Leaf)){ Clear-S3Env; throw 'Catalogo local nao
 try {
   $cat=Get-Content $catalog -Raw | ConvertFrom-Json
   $count=@($cat.assets).Count
-  if($count -lt 1){ throw 'Catalogo foi criado sem assets elegiveis.' }
-  Write-Host "Catalogo pronto: $count assets elegiveis."
+  if($cat.scope -ne 'media/gta_vi-active-edit-only'){ throw "Escopo inesperado: $($cat.scope)" }
+  if($cat.gateway_version -ne '3.0-active-gta-vi'){ throw "Gateway/catalogo desatualizado: $($cat.gateway_version)" }
+  if($count -lt 126){ throw "Catalogo ativo tem somente $count visuais unicos; minimo esperado: 126." }
+  $bad=@($cat.assets | Where-Object {
+    $_.collection -ne 'media/gta_vi' -or
+    $_.file_name -notlike '*-mudo.mp4' -or
+    $_.relative_path -notmatch '^media/gta_vi/'
+  })
+  if($bad.Count -gt 0){ throw "Catalogo contem $($bad.Count) assets fora da arvore ativa ou sem sufixo -mudo.mp4." }
+  Write-Host "Catalogo pronto: $count visuais unicos elegiveis em media/gta_vi."
+  Write-Host "Arquivos ativos encontrados: $($cat.raw_active_edit_files); aliases duplicados removidos: $($cat.deduplicated_aliases)."
 } catch {
   Clear-S3Env
   throw "Catalogo invalido: $($_.Exception.Message)"
 }
 
-# O runner rele a mesma credencial criptografada e sobe gateway+tunel.
 $cmd="powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runner`" -Repo `"$Repo`" -Root `"$Root`""
 New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'MediaForgeDellAssetGateway' -Value $cmd -PropertyType String -Force | Out-Null
 
@@ -139,7 +148,12 @@ for($i=0;$i -lt 75;$i++){
     if($u){
       try {
         $h=Invoke-RestMethod -Method Get -Uri ($u.TrimEnd('/') + '/health') -TimeoutSec 15
-        if($h.ok -eq $true){ $ready=$true; Write-Host "Gateway online e validado: $u"; break }
+        if($h.ok -eq $true -and $h.version -eq '3.0-active-gta-vi' -and [int]$h.catalog_assets -ge 126){
+          $ready=$true
+          Write-Host "Gateway online e validado: $u"
+          Write-Host "Gateway version: $($h.version); assets ativos: $($h.catalog_assets)"
+          break
+        }
       } catch { }
     }
   }
@@ -147,9 +161,9 @@ for($i=0;$i -lt 75;$i++){
 
 Clear-S3Env
 if(-not $ready){
-  throw 'Gateway nao ficou acessivel dentro do prazo. Consulte %LOCALAPPDATA%\MediaForge\cloudflared.err.log.'
+  throw 'Gateway ativo v3 nao ficou acessivel dentro do prazo. Consulte %LOCALAPPDATA%\MediaForge\cloudflared.err.log.'
 }
 
 Write-Host ''
-Write-Host 'SETUP CONCLUIDO: Dell Asset Gateway pronto.'
+Write-Host 'SETUP CONCLUIDO: Dell Asset Gateway v3 pronto.'
 Write-Host 'Nenhum MP4 foi enviado ao Supabase. Os videos originais continuam somente no Dell.'
