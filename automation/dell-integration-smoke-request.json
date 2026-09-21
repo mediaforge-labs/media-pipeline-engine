@@ -1,8 +1,12 @@
 {
   "reason": "sweep_active_gta_vi_repository_from_updated_inventory",
   "publish": false,
-  "expected_active_edit_assets": 604,
+  "organized_edit_files": 604,
+  "activity_files": 593,
+  "distinct_activity_clips": 126,
+  "local_master_files": 11,
   "eligible_collection": "media/gta_vi",
   "eligible_suffix": "-mudo.mp4",
-  "requested_at": "2026-09-21T22:54:00Z"
+  "revision": 2,
+  "requested_at": "2026-09-21T23:05:00Z"
 }
