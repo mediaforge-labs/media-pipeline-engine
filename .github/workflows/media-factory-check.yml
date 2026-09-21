@@ -88,8 +88,9 @@ jobs:
           grep -q 'catalog_availability_preflight' public-worker-template/dell_asset_client_v5.py
           grep -q 'Range.*bytes=0-0' public-worker-template/dell_asset_client_v5.py
           grep -q 'ThreadPoolExecutor' public-worker-template/dell_asset_client_v5.py
-          grep -q 'Live GTA VI asset inventory is insufficient before TTS/render' public-worker-template/dell_asset_client_v5.py
           grep -q 'active_gta_vi_catalog_filter' public-worker-template/dell_asset_client_v5.py
+          grep -q 'semantic_scene_plan' public-worker-template/dell_asset_client_v5.py
+          grep -q 'MEDIAFORGE_SCENE_TARGET_WORDS' public-worker-template/dell_asset_client_v5.py
           grep -q -- '-mudo.mp4' public-worker-template/dell_asset_client_v5.py
           grep -q 'media/gta_vi' public-worker-template/dell_asset_client_v5.py
 
@@ -116,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import ast, os, pathlib
+          import ast, pathlib
           p=pathlib.Path('public-worker-template/dell_asset_client_v5.py')
           tree=ast.parse(p.read_text())
           wanted={'_normalise_path','_is_active_edit_asset'}
@@ -131,53 +132,82 @@ jobs:
           print('active_gta_vi_edit_filter_ok')
           PY
 
-      - name: Prove semantic selection cannot shrink below live unique inventory
+      - name: Prove adaptive scene plan fits distinct live clips without reuse
         run: |
           set -euo pipefail
           python - <<'PY'
-          import ast, pathlib
+          import ast, math, os, pathlib
+          p=pathlib.Path('public-worker-template/dell_asset_client_v5.py')
+          tree=ast.parse(p.read_text())
+          fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_scene_plan')
+
+          def fake_segmenter(script, target_words=12, max_words=18):
+              words=len(script.split())
+              return [f'scene-{i}' for i in range(math.ceil(words/target_words))]
+
+          ns={'math':math,'os':os,'_original_segment_script':fake_segmenter}
+          exec(compile(ast.Module(body=[fn],type_ignores=[]),str(p),'exec'),ns)
+          plan=ns['_scene_plan']
+
+          script='word ' * 1800
+          scenes,target,max_words=plan(script,126)
+          assert len(scenes) <= 126
+          assert 16 <= target <= 24
+          assert max_words >= target
+
+          try:
+              plan('word ' * 4000,126)
+          except SystemExit as exc:
+              assert 'without reuse' in str(exc)
+              assert 'Shorten the script or add distinct GTA VI source clips' in str(exc)
+          else:
+              raise AssertionError('scene planner accepted a script that cannot fit unique inventory')
+          print('adaptive_scene_plan_ok')
+          PY
+
+      - name: Prove selector uses only live active inventory
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast, json, pathlib
           p=pathlib.Path('public-worker-template/dell_asset_client_v5.py')
           tree=ast.parse(p.read_text())
           fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='choose_unique_pool_live')
 
           class Legacy:
-              @staticmethod
-              def segment_script(script):
-                  return ['scene-a', 'scene-b', 'scene-c']
-
-          state={'live': [{'asset_id':'a'}, {'asset_id':'b'}]}
-          def active_catalog(assets):
-              return list(assets)
-          def live_catalog(assets):
-              live=list(state['live'])
-              stale=[str(x['asset_id']) for x in assets if x not in live]
-              return live, stale
+              def __init__(self):
+                  self.segment_script=lambda text,target_words=12,max_words=18:['legacy']
+          legacy=Legacy()
+          original_segmenter=legacy.segment_script
+          live=[{'asset_id':f'a{i}'} for i in range(5)]
           calls=[]
-          def chooser(title, script, assets, max_assets, byte_budget):
+
+          def active_catalog(assets): return list(assets)
+          def live_catalog(assets): return list(live), ['stale-x']
+          def scene_plan(script, live_count):
+              assert live_count==5
+              return ['scene-a','scene-b','scene-c'],16,24
+          def chooser(title,script,assets,max_assets,byte_budget):
               calls.append(list(assets))
+              assert legacy.segment_script(script)==['scene-a','scene-b','scene-c']
               return 'selected'
+          def fallback_segmenter(text,target_words=12,max_words=18): return ['fallback']
 
           ns={
-              'legacy': Legacy(),
-              '_active_edit_assets': active_catalog,
-              '_live_catalog_assets': live_catalog,
-              '_original_choose_unique_pool': chooser,
+              'legacy':legacy,
+              '_active_edit_assets':active_catalog,
+              '_live_catalog_assets':live_catalog,
+              '_scene_plan':scene_plan,
+              '_original_choose_unique_pool':chooser,
+              '_original_segment_script':fallback_segmenter,
+              'json':json,
           }
-          exec(compile(ast.Module(body=[fn], type_ignores=[]), str(p), 'exec'), ns)
-          choose=ns['choose_unique_pool_live']
-          catalog=[{'asset_id':'a'}, {'asset_id':'b'}, {'asset_id':'c'}, {'asset_id':'d'}]
-          try:
-              choose('title', 'one two three', catalog, 180, 10_000_000)
-          except SystemExit as exc:
-              text=str(exc)
-              assert 'live=2' in text and 'required=3' in text and 'reuse remains disabled' in text
-          else:
-              raise AssertionError('selector silently accepted insufficient live inventory')
-
-          state['live']=[{'asset_id':'a'}, {'asset_id':'b'}, {'asset_id':'c'}]
-          assert choose('title', 'one two three', catalog, 180, 10_000_000) == 'selected'
-          assert len(calls)==1 and len(calls[0])==3
-          print('live_inventory_selection_gate_ok')
+          exec(compile(ast.Module(body=[fn],type_ignores=[]),str(p),'exec'),ns)
+          result=ns['choose_unique_pool_live']('title','script text',list(live)+[{'asset_id':'legacy'}],180,10_000_000)
+          assert result=='selected'
+          assert calls==[live]
+          assert legacy.segment_script is original_segmenter
+          print('live_active_selector_ok')
           PY
 
       - name: Exercise final media validator with real decodable fixtures
