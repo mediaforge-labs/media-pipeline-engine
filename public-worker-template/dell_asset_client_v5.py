@@ -9,7 +9,8 @@ V5 keeps semantic scoring from the proven legacy client while hardening transpor
 - stale->stale->valid replacement chains keep their semantic mapping correct;
 - a live /health response is authoritative, so an old stored heartbeat cannot block a
   healthy persistent Dell gateway;
-- the complete owner-curated catalog is availability-probed before semantic selection,
+- only the active ``media/gta_vi`` edit collection (``-mudo.mp4``) is eligible;
+- the eligible owner-curated catalog is availability-probed before semantic selection,
   so dead/stale catalog IDs can never consume one of the required unique scene slots.
 """
 
@@ -57,7 +58,7 @@ def _confirm_live_gateway(status: dict) -> dict:
     try:
         response = legacy.requests.get(
             f"{public_url}/health",
-            headers={"User-Agent": "MediaForge-GitHub/5.4-live-asset-preflight"},
+            headers={"User-Agent": "MediaForge-GitHub/5.5-active-gta-vi-preflight"},
             timeout=12,
         )
         if response.status_code != 200:
@@ -104,6 +105,78 @@ def _control_v5(action: str, body: dict | None = None):
 legacy.control = _control_v5
 
 
+def _normalise_path(value: object) -> str:
+    return str(value or "").strip().replace("\\", "/").lower().lstrip("./")
+
+
+def _is_active_edit_asset(asset: dict) -> bool:
+    """Match the repository contract from the current GTA VI inventory documents.
+
+    Active edit assets live under ``media/gta_vi`` (or a path relative to that root) and
+    are silent edit files ending in ``-mudo.mp4``. Legacy ``stock_videos`` and
+    ``stock_images`` remain catalogued source material but are not production inputs.
+    """
+    values = {
+        key: _normalise_path(asset.get(key))
+        for key in ("file_name", "relative_path", "path", "source", "collection", "collection_path")
+    }
+    filename = values["file_name"] or pathlib.PurePosixPath(
+        values["relative_path"] or values["source"] or values["path"]
+    ).name
+    if not filename.endswith("-mudo.mp4"):
+        return False
+
+    directory_values = [
+        values["relative_path"],
+        values["path"],
+        values["source"],
+        values["collection"],
+        values["collection_path"],
+    ]
+    populated_directories = [value for value in directory_values if value]
+    if not populated_directories:
+        # Some gateway catalog versions expose only file_name. ``-mudo.mp4`` is the
+        # canonical edit-file suffix, so retain it when no contradictory path exists.
+        return True
+
+    for value in populated_directories:
+        padded = f"/{value.strip('/')}"
+        if (
+            "/media/gta_vi/" in padded + "/"
+            or padded.startswith("/gta_vi/")
+            or padded.startswith("/cortes_por_atividade/")
+            or padded.startswith("/por_local/")
+            or value == "media/gta_vi"
+        ):
+            return True
+    return False
+
+
+def _active_edit_assets(assets: list[dict]) -> list[dict]:
+    active = [item for item in assets if _is_active_edit_asset(item)]
+    baseline = max(1, int(os.getenv("MEDIAFORGE_ACTIVE_GTA_VI_BASELINE", "604")))
+    print(
+        json.dumps(
+            {
+                "active_gta_vi_catalog_filter": "complete",
+                "raw_catalog_assets": len(assets),
+                "active_edit_assets": len(active),
+                "excluded_non_edit_assets": len(assets) - len(active),
+                "repository_baseline": baseline,
+                "eligible_suffix": "-mudo.mp4",
+                "eligible_collection": "media/gta_vi",
+            }
+        )
+    )
+    if len(active) < baseline:
+        raise SystemExit(
+            "Active GTA VI edit catalog is below the updated repository baseline before TTS/render: "
+            f"active={len(active)}, baseline={baseline}, raw_catalog={len(assets)}. "
+            "Reindex the Dell gateway from media/gta_vi; stock_videos and stock_images are not eligible."
+        )
+    return active
+
+
 def _delete_request(request_id: str) -> None:
     try:
         legacy.control("delete_request", {"request_id": request_id})
@@ -147,7 +220,7 @@ def _probe_authorized_asset(public_url: str, request_id: str, token: str, asset:
                 url,
                 headers={
                     "X-MediaForge-Request-Token": token,
-                    "User-Agent": "MediaForge-GitHub/5.4-live-asset-preflight",
+                    "User-Agent": "MediaForge-GitHub/5.5-active-gta-vi-preflight",
                     "Range": "bytes=0-0",
                 },
             )
@@ -246,17 +319,18 @@ def _live_catalog_assets(assets: list[dict]) -> tuple[list[dict], list[str]]:
 
 
 def choose_unique_pool_live(title: str, script: str, assets: list[dict], max_assets: int, byte_budget: int):
-    """Select semantics only after every candidate has been proven live."""
-    live_assets, stale_ids = _live_catalog_assets(assets)
+    """Select semantics only from the documented active edit tree and proven-live files."""
+    active_assets = _active_edit_assets(assets)
+    live_assets, stale_ids = _live_catalog_assets(active_assets)
     segments = legacy.segment_script(script)
     words = max(1, len(script.split()))
     required_unique = max(len(segments), (words + 11) // 12)
     if len(live_assets) < required_unique:
         raise SystemExit(
             "Live GTA VI asset inventory is insufficient before TTS/render: "
-            f"live={len(live_assets)}, required={required_unique}, catalog={len(assets)}, "
-            f"stale={len(stale_ids)}. Refresh/reindex the Dell owner-curated catalog; "
-            "reuse remains disabled."
+            f"live={len(live_assets)}, required={required_unique}, active_catalog={len(active_assets)}, "
+            f"raw_catalog={len(assets)}, stale={len(stale_ids)}. Refresh/reindex the Dell "
+            "media/gta_vi collection; reuse remains disabled."
         )
     return _original_choose_unique_pool(title, script, live_assets, max_assets, byte_budget)
 
@@ -295,7 +369,7 @@ def download_asset(status: dict, ignored_request_id: str, ignored_token: str, it
                 url,
                 headers={
                     "X-MediaForge-Request-Token": token,
-                    "User-Agent": "MediaForge-GitHub/5.4-live-asset-preflight",
+                    "User-Agent": "MediaForge-GitHub/5.5-active-gta-vi-preflight",
                 },
             )
             with urllib.request.urlopen(request, timeout=1800) as source, part.open("wb") as target:
