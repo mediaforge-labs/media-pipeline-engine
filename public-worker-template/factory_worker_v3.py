@@ -84,6 +84,8 @@ def validate_media_pool(asset_root: pathlib.Path) -> dict:
 
     if selection.get("reuse_allowed") is not False:
         raise RuntimeError("Media pool does not enforce reuse_allowed=false")
+    if selection.get("scope") != "gta-vi-owner-curated-only":
+        raise RuntimeError(f"Media pool scope is not GTA VI owner curated: {selection.get('scope')}")
     if required < 1 or selected < required:
         raise RuntimeError(f"Insufficient unique media: selected={selected}, required={required}")
     if len(ids) != len(set(ids)):
@@ -127,10 +129,55 @@ def validate_media_pool(asset_root: pathlib.Path) -> dict:
     }
 
 
+def pre_upload_transform(out: pathlib.Path) -> None:
+    """Hook overridden by v4 to apply the approved watermark before final validation."""
+    del out
+
+
+def probe_duration(path: pathlib.Path) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    duration = float(result.stdout.strip())
+    if duration <= 0:
+        raise RuntimeError(f"Invalid final video duration: {duration}")
+    return duration
+
+
+def run_validator(args: argparse.Namespace, out: pathlib.Path, asset_root: pathlib.Path, env: dict[str, str]) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            args.validator,
+            "--root",
+            str(out),
+            "--selection",
+            str(asset_root / "mediaforge-selection.json"),
+            "--require-five-shorts",
+        ],
+        check=True,
+        env=env,
+    )
+
+
 def run_factory(args: argparse.Namespace) -> int:
     owner = f"github:{os.environ.get('GITHUB_RUN_ID', 'local')}:{args.lane}"
     job = None
     variant = None
+    queue = None
     asset_root: pathlib.Path | None = None
 
     try:
@@ -156,12 +203,22 @@ def run_factory(args: argparse.Namespace) -> int:
             raise RuntimeError(
                 f"Video variant not found for queue={job['queue_id']} locale={args.locale}"
             )
+        if variant.get("youtube_privacy_status") != "private":
+            raise RuntimeError("Safety block: production variant is not private")
+        if variant.get("youtube_video_id"):
+            raise RuntimeError(
+                f"Safety block: variant already has YouTube checkpoint {variant['youtube_video_id']}; refusing rerender"
+            )
 
-        base.patch_rows(
-            "youtube_queue",
-            {"status": "rendering", "updated_at": base.utcnow()},
-            id=job["queue_id"],
-        )
+        queue_before_status = str(queue.get("status") or "")
+        if args.locale == "pt-BR":
+            updated_queue = base.patch_rows(
+                "youtube_queue",
+                {"status": "rendering", "last_error": None, "updated_at": base.utcnow()},
+                id=job["queue_id"],
+            )
+            if not updated_queue:
+                raise RuntimeError("Could not checkpoint PT queue as rendering")
 
         runtime = pathlib.Path(args.runtime_dir)
         runtime.mkdir(parents=True, exist_ok=True)
@@ -247,27 +304,21 @@ def run_factory(args: argparse.Namespace) -> int:
         )
 
         out = pathlib.Path(args.output_dir)
-        subprocess.run(
-            [
-                sys.executable,
-                args.validator,
-                "--root",
-                str(out),
-                "--selection",
-                str(asset_root / "mediaforge-selection.json"),
-                "--require-five-shorts",
-            ],
-            check=True,
-            env=env,
-        )
+        # First validate the renderer's raw output, then apply the v4 watermark hook and
+        # validate the exact bytes that will be stored/uploaded. This closes the old gap
+        # where watermark re-encoding happened after validation.
+        run_validator(args, out, asset_root, env)
+        pre_upload_transform(out)
+        run_validator(args, out, asset_root, env)
 
         render_manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        final_duration = probe_duration(out / "video" / "long-form.mp4")
         run_key = os.environ.get(
             "GITHUB_RUN_ID",
             datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
         )
         prefix = f"renders/{job['queue_id']}/{args.locale}/{run_key}"
-        storage = base.s3_client()
+        storage = None  # v4/resilient storage uses verified Supabase REST, not S3.
 
         video_uri = base.storage_upload(storage, out / "video" / "long-form.mp4", f"{prefix}/long-form.mp4")
         audio_uri = base.storage_upload(storage, out / "audio" / "narration.wav", f"{prefix}/narration.wav")
@@ -280,8 +331,11 @@ def run_factory(args: argparse.Namespace) -> int:
         base.storage_upload(storage, out / "captions" / "long-form.srt", f"{prefix}/long-form.srt")
         base.storage_upload(storage, out / "media" / "manifest.json", f"{prefix}/media-manifest.json")
 
+        shorts = sorted((out / "shorts").glob("short-*.mp4"))
+        if len(shorts) != 5:
+            raise RuntimeError(f"Production contract requires exactly 5 Shorts, got {len(shorts)}")
         short_uris: list[str] = []
-        for short in sorted((out / "shorts").glob("short-*.mp4")):
+        for short in shorts:
             short_uris.append(
                 base.storage_upload(storage, short, f"{prefix}/shorts/{short.name}")
             )
@@ -294,25 +348,30 @@ def run_factory(args: argparse.Namespace) -> int:
         else:
             next_status = "video_ready"
 
-        duration = float((render_manifest.get("metrics") or {}).get("narration_seconds") or 0)
-        base.patch_rows(
+        variant_rows = base.patch_rows(
             "youtube_video_variants",
             {
                 "status": next_status,
                 "audio_url": audio_uri,
                 "video_url": video_uri,
-                "video_duration_seconds": duration,
+                "video_duration_seconds": final_duration,
                 "render_version": RENDER_VERSION,
                 "last_error": None,
                 "updated_at": base.utcnow(),
             },
             id=variant["id"],
         )
+        if not variant_rows:
+            raise RuntimeError("MediaForge output stored but variant checkpoint could not be written")
 
         if args.locale == "pt-BR":
-            base.patch_rows(
+            restore_status = queue_before_status
+            if restore_status in {"", "rendering", "failed"}:
+                restore_status = "voice_ready"
+            queue_rows = base.patch_rows(
                 "youtube_queue",
                 {
+                    "status": restore_status,
                     "audio_url": audio_uri,
                     "video_url": video_uri,
                     "last_error": None,
@@ -320,6 +379,8 @@ def run_factory(args: argparse.Namespace) -> int:
                 },
                 id=job["queue_id"],
             )
+            if not queue_rows:
+                raise RuntimeError("PT MediaForge output stored but queue checkpoint could not be written")
 
         metadata = dict(job.get("metadata") or {})
         metadata["result"] = {
@@ -330,15 +391,17 @@ def run_factory(args: argparse.Namespace) -> int:
             "shorts": short_uris,
             "render_version": RENDER_VERSION,
             "metrics": render_manifest.get("metrics") or {},
+            "final_video_duration_seconds": final_duration,
             "media_preflight": media_result,
             "music_enabled": False,
         }
-        base.patch_rows(
+        job_rows = base.patch_rows(
             "youtube_factory_jobs",
             {
                 "status": "completed",
                 "last_progress_at": base.utcnow(),
                 "completed_at": base.utcnow(),
+                "lease_owner": None,
                 "lease_expires_at": None,
                 "metadata": metadata,
                 "updated_at": base.utcnow(),
@@ -346,6 +409,8 @@ def run_factory(args: argparse.Namespace) -> int:
             id=job["id"],
             lease_owner=owner,
         )
+        if not job_rows:
+            raise RuntimeError("Factory render succeeded but lease checkpoint could not be finalized")
 
         print(
             json.dumps(
@@ -358,6 +423,7 @@ def run_factory(args: argparse.Namespace) -> int:
                     "shorts": len(short_uris),
                     "music_enabled": False,
                     "render_version": RENDER_VERSION,
+                    "final_video_duration_seconds": final_duration,
                 },
                 ensure_ascii=False,
             )
@@ -365,7 +431,7 @@ def run_factory(args: argparse.Namespace) -> int:
         return 0
 
     except Exception as exc:
-        base.mark_failed(job, variant, owner, str(exc))
+        base.mark_failed(job, variant, owner, str(exc), queue=queue)
         raise
     finally:
         if asset_root is not None:
