@@ -8,6 +8,7 @@ on:
     paths:
       - public-worker-template/factory_worker_v2.py
       - public-worker-template/factory_worker_v3.py
+      - public-worker-template/factory_worker_v4.py
       - public-worker-template/dell_asset_client.py
       - public-worker-template/dell_asset_client_v5.py
       - public-worker-template/worker.py
@@ -42,20 +43,25 @@ jobs:
           python -m py_compile \
             public-worker-template/factory_worker_v2.py \
             public-worker-template/factory_worker_v3.py \
+            public-worker-template/factory_worker_v4.py \
             public-worker-template/dell_asset_client.py \
             public-worker-template/dell_asset_client_v5.py \
             public-worker-template/worker.py \
             public-worker-template/validate_render.py
 
-      - name: Verify production workflow uses strict V3
+      - name: Verify production workflow uses strict V4 with approved watermark on long-form and Shorts
         run: |
           set -euo pipefail
-          grep -q 'factory_worker_v3.py' .github/workflows/media-factory.yml
+          grep -q 'factory_worker_v4.py' .github/workflows/media-factory.yml
           grep -q "MEDIAFORGE_TTS_STRICT_CHUNK_ORDER: '1'" .github/workflows/media-factory.yml
           grep -q "MEDIAFORGE_STRICT_UNIQUE_MEDIA: '1'" .github/workflows/media-factory.yml
           grep -q 'music_enabled.*False' public-worker-template/factory_worker_v3.py
           grep -q -- '--verify-only' public-worker-template/factory_worker_v3.py
           grep -q -- '--require-five-shorts' public-worker-template/factory_worker_v3.py
+          grep -q 'mediaforge-github-v10-strict-watermarked-shorts-v2' public-worker-template/factory_worker_v4.py
+          grep -q 'is_long_form or is_short' public-worker-template/factory_worker_v4.py
+          grep -q '"/shorts/" in storage_path' public-worker-template/factory_worker_v4.py
+          grep -q 'leonidanos-logo.png' public-worker-template/factory_worker_v4.py
 
       - name: Exercise strict selection-manifest fallback without rendering
         run: |
