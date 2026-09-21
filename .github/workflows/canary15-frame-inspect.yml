@@ -1,0 +1,56 @@
+name: Canary 15 Frame Inspect
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/canary15-frame-inspect.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download Canary 15 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mediaforge-dell-canary-35553959281
+          path: canary15
+          repository: mediaforge-labs/media-pipeline-engine
+          run-id: 35553959281
+          github-token: ${{ github.token }}
+      - name: Extract representative frames
+        run: |
+          set -euo pipefail
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y --no-install-recommends ffmpeg >/dev/null
+          VIDEO="canary15/video/long-form.mp4"
+          test -s "$VIDEO"
+          mkdir -p inspect
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$VIDEO")
+          python - "$DURATION" <<'PY' > inspect/times.txt
+import sys
+x=float(sys.argv[1])
+for p in (0.08,0.25,0.50,0.75,0.92): print(max(0.0,x*p))
+PY
+          i=0
+          while read -r t; do
+            i=$((i+1))
+            ffmpeg -y -loglevel error -ss "$t" -i "$VIDEO" -frames:v 1 -q:v 2 "inspect/frame-$i.jpg"
+          done < inspect/times.txt
+          ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_name,width,height -of json "$VIDEO" > inspect/ffprobe.json
+          cp canary15/manifest.json inspect/manifest.json
+          cp canary15/media/manifest.json inspect/media-manifest.json
+          find canary15/shorts -maxdepth 1 -type f -name '*.mp4' -printf '%f\n' | sort > inspect/shorts.txt
+      - name: Upload small inspection artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary15-frame-inspection
+          path: inspect
+          retention-days: 2
+          compression-level: 6
