@@ -1,0 +1,49 @@
+name: MediaForge E2E Preflight
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - public-worker-template/e2e_preflight.py
+      - public-worker-template/factory_worker_v2.py
+      - public-worker-template/factory_worker_v3.py
+      - public-worker-template/factory_worker_v3_resilient.py
+      - public-worker-template/factory_worker_v4.py
+      - public-worker-template/supabase_chunked.py
+      - .github/workflows/mediaforge-e2e-preflight.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mediaforge-e2e-preflight
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: main}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Install preflight dependencies
+        run: |
+          set -euo pipefail
+          pip install --no-cache-dir requests boto3
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          python -m py_compile \
+            public-worker-template/factory_worker_v2.py \
+            public-worker-template/factory_worker_v3.py \
+            public-worker-template/factory_worker_v3_resilient.py \
+            public-worker-template/factory_worker_v4.py \
+            public-worker-template/supabase_chunked.py \
+            public-worker-template/e2e_preflight.py
+      - name: Run non-production end-to-end preflight
+        run: python public-worker-template/e2e_preflight.py
