@@ -47,6 +47,10 @@ jobs:
         env:
           SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          # Updated repository inventory: 593 organized activity files represent
+          # 126 distinct visual cuts. The gateway intentionally deduplicates copies
+          # stored under multiple activity folders, so 126 is the unique-media floor.
+          MEDIAFORGE_ACTIVE_GTA_VI_BASELINE: '126'
         run: |
           set -euo pipefail
           python public-worker-template/dell_asset_client_v5.py \
