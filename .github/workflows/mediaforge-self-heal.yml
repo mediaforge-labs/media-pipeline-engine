@@ -9,6 +9,10 @@ on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/mediaforge-self-heal.yml
 
 permissions:
   contents: read
@@ -52,10 +56,30 @@ jobs:
               echo 'No failed MediaForge run found.'
               exit 0
             fi
+
             RUN_ID="$(jq -r '.id' <<<"$ROW")"
             RUN_NAME="$(jq -r '.name' <<<"$ROW")"
             RUN_ATTEMPT="$(jq -r '.run_attempt // 1' <<<"$ROW")"
             CONCLUSION="$(jq -r '.conclusion // "failure"' <<<"$ROW")"
+            UPDATED_AT="$(jq -r '.updated_at' <<<"$ROW")"
+
+            export UPDATED_AT
+            if ! python - <<'PY'
+          from datetime import datetime, timezone
+          import os, sys
+          raw = os.environ.get('UPDATED_AT','')
+          try:
+              updated = datetime.fromisoformat(raw.replace('Z','+00:00'))
+          except Exception:
+              sys.exit(1)
+          age = datetime.now(timezone.utc) - updated
+          sys.exit(0 if age.total_seconds() <= 6 * 3600 else 1)
+          PY
+            then
+              echo 'has_target=false' >> "$GITHUB_OUTPUT"
+              echo 'Latest failed run is older than 6 hours; scheduled fallback will not reopen stale failures.'
+              exit 0
+            fi
           fi
 
           echo "has_target=true" >> "$GITHUB_OUTPUT"
@@ -107,6 +131,8 @@ jobs:
       - name: Classify failure
         if: ${{ steps.collect.outputs.has_failed_jobs == 'true' }}
         id: classify
+        env:
+          RUN_ATTEMPT: ${{ steps.target.outputs.run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
@@ -115,6 +141,7 @@ jobs:
           import os, re
 
           text = Path('.self-heal/all-failed.log').read_text(encoding='utf-8', errors='ignore').lower()
+          attempt = int(os.environ.get('RUN_ATTEMPT') or '1')
 
           fatal_patterns = {
               'auth_or_secret': [
@@ -145,7 +172,6 @@ jobs:
           for name, pats in fatal_patterns.items():
               if any(re.search(p, text) for p in pats):
                   category = name
-                  retryable = False
                   break
           else:
               for name, pats in transient_patterns.items():
@@ -154,18 +180,21 @@ jobs:
                       retryable = True
                       break
 
-          out = os.environ['GITHUB_OUTPUT']
-          with open(out, 'a', encoding='utf-8') as f:
+          can_retry = retryable and attempt < 3
+          maxed = retryable and attempt >= 3
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
               f.write(f'category={category}\n')
               f.write(f'retryable={str(retryable).lower()}\n')
-          print({'category': category, 'retryable': retryable})
-          PY
+              f.write(f'can_retry={str(can_retry).lower()}\n')
+              f.write(f'maxed={str(maxed).lower()}\n')
 
-          {
-            echo
-            echo "- Failure class: ${{ steps.classify.outputs.category }}"
-            echo "- Retryable automatically: ${{ steps.classify.outputs.retryable }}"
-          } >> "$GITHUB_STEP_SUMMARY"
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write(f'\n- Failure class: {category}\n')
+              f.write(f'- Retryable automatically: {str(retryable).lower()}\n')
+              f.write(f'- Automatic retry allowed on this attempt: {str(can_retry).lower()}\n')
+          print({'category': category, 'retryable': retryable, 'attempt': attempt, 'can_retry': can_retry})
+          PY
 
       - name: Upload failure diagnostics
         if: ${{ steps.collect.outputs.has_failed_jobs == 'true' }}
@@ -178,7 +207,7 @@ jobs:
           if-no-files-found: error
 
       - name: Auto-rerun transient failure
-        if: ${{ steps.classify.outputs.retryable == 'true' && fromJSON(steps.target.outputs.run_attempt) < 3 }}
+        if: ${{ steps.classify.outputs.can_retry == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -193,11 +222,11 @@ jobs:
           {
             echo
             echo 'Automatic retry intentionally skipped to avoid wasting another expensive render.'
-            echo 'Diagnostics were preserved for external code remediation and checkpoint-aware resume.'
+            echo 'Diagnostics were preserved for code remediation and checkpoint-aware resume.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stop retry loop after maximum attempts
-        if: ${{ steps.classify.outputs.retryable == 'true' && fromJSON(steps.target.outputs.run_attempt) >= 3 }}
+        if: ${{ steps.classify.outputs.maxed == 'true' }}
         shell: bash
         run: |
           echo 'Maximum automatic retry attempts reached; diagnostics preserved for remediation.' >> "$GITHUB_STEP_SUMMARY"
