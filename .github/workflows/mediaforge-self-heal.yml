@@ -5,9 +5,8 @@ on:
     workflows:
       - MediaForge Production Factory
       - MediaForge Dell Canary
+      - MediaForge Dell Canary Resume
     types: [completed]
-  schedule:
-    - cron: '*/15 * * * *'
   workflow_dispatch:
   push:
     branches: [main]
@@ -46,7 +45,7 @@ jobs:
           else
             ROW="$(gh api "repos/$REPO/actions/runs?status=completed&per_page=50" --jq '
               .workflow_runs
-              | map(select((.name == "MediaForge Production Factory" or .name == "MediaForge Dell Canary") and (.conclusion != "success" and .conclusion != "skipped")))
+              | map(select((.name == "MediaForge Production Factory" or .name == "MediaForge Dell Canary" or .name == "MediaForge Dell Canary Resume") and (.conclusion != "success" and .conclusion != "skipped")))
               | sort_by(.updated_at)
               | reverse
               | .[0] // empty
@@ -77,7 +76,7 @@ jobs:
           PY
             then
               echo 'has_target=false' >> "$GITHUB_OUTPUT"
-              echo 'Latest failed run is older than 6 hours; scheduled fallback will not reopen stale failures.'
+              echo 'Latest failed run is older than 6 hours; manual/push validation will not reopen stale failures.'
               exit 0
             fi
           fi
