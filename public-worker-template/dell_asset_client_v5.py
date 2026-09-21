@@ -141,8 +141,6 @@ def _is_active_edit_asset(asset: dict) -> bool:
     ]
     populated_directories = [value for value in directory_values if value]
     if not populated_directories:
-        # Some gateway catalog versions expose only file_name. ``-mudo.mp4`` is the
-        # canonical edit-file suffix, so retain it when no contradictory path exists.
         return True
 
     for value in populated_directories:
@@ -160,10 +158,6 @@ def _is_active_edit_asset(asset: dict) -> bool:
 
 def _active_edit_assets(assets: list[dict]) -> list[dict]:
     active = [item for item in assets if _is_active_edit_asset(item)]
-    # The current repository contains 604 organized edit-file placements, but 593 of
-    # those placements represent 126 distinct visual cuts copied into activity folders.
-    # The Dell gateway deduplicates identical source content, so the invariant here is
-    # the distinct activity-clip floor, not the directory-placement count.
     baseline = max(1, int(os.getenv("MEDIAFORGE_ACTIVE_GTA_VI_BASELINE", "126")))
     print(
         json.dumps(
@@ -214,12 +208,6 @@ def _create_single_asset_request(asset_id: str) -> tuple[str, str]:
 
 
 def _probe_authorized_asset(public_url: str, request_id: str, token: str, asset: dict) -> tuple[str, bool | None, str]:
-    """Read one byte from an authorized asset without downloading the whole source.
-
-    ``False`` is reserved for authoritative stale/missing responses (404/410). ``None``
-    means the availability check itself was inconclusive and must abort the preflight;
-    a transient network failure must never cause a valid owner asset to be discarded.
-    """
     asset_id = str(asset.get("asset_id") or "").strip()
     if not asset_id:
         return asset_id, False, "missing asset_id"
@@ -257,12 +245,6 @@ def _probe_authorized_asset(public_url: str, request_id: str, token: str, asset:
 
 
 def _live_catalog_assets(assets: list[dict]) -> tuple[list[dict], list[str]]:
-    """Return only catalog entries proven readable by the live Dell gateway.
-
-    Requests are authorized in batches below the gateway's 200-ID ceiling. Probes run
-    concurrently but only read a single byte, making this much cheaper than discovering
-    stale IDs while downloading/rendering the final production set.
-    """
     if not assets:
         return [], []
     status = legacy.control("status")
@@ -331,14 +313,6 @@ def _live_catalog_assets(assets: list[dict]) -> tuple[list[dict], list[str]]:
 
 
 def _scene_plan(script: str, live_count: int) -> tuple[list[str], int, int]:
-    """Create a no-reuse scene plan that fits the real unique inventory.
-
-    The old 12-word target forced 148-152 distinct sources for some long scripts even
-    though the refreshed repository documents 126 distinct activity clips. A 16-word
-    target (max 24) keeps normal scene duration around a few seconds and fits those same
-    narrations without repeating any source. If a future script still exceeds the live
-    inventory, target size increases only as much as necessary, up to 24 words.
-    """
     words = max(1, len((script or "").split()))
     configured = max(12, min(24, int(os.getenv("MEDIAFORGE_SCENE_TARGET_WORDS", "16"))))
     target = configured
@@ -358,7 +332,6 @@ def _scene_plan(script: str, live_count: int) -> tuple[list[str], int, int]:
 
 
 def choose_unique_pool_live(title: str, script: str, assets: list[dict], max_assets: int, byte_budget: int):
-    """Select semantics only from the documented active edit tree and proven-live files."""
     active_assets = _active_edit_assets(assets)
     live_assets, stale_ids = _live_catalog_assets(active_assets)
     segments, target_words, max_words = _scene_plan(script, len(live_assets))
@@ -389,14 +362,10 @@ def choose_unique_pool_live(title: str, script: str, assets: list[dict], max_ass
     previous_segmenter = legacy.segment_script
 
     def planned_segmenter(text: str, target_words: int = 12, max_words: int = 18) -> list[str]:
-        del target_words, max_words
         if text == script:
             return list(segments)
         return _original_segment_script(text, target_words=target_words, max_words=max_words)
 
-    # The legacy selector computes a conservative reserve count from 12-word scenes but
-    # looks up segment_script dynamically. Supplying the validated plan here preserves
-    # its proven semantic scoring while making the real scene map fit the live inventory.
     legacy.segment_script = planned_segmenter
     try:
         return _original_choose_unique_pool(title, script, live_assets, max_assets, byte_budget)
@@ -408,14 +377,6 @@ legacy.choose_unique_pool = choose_unique_pool_live
 
 
 def download_asset(status: dict, ignored_request_id: str, ignored_token: str, item: dict, out: pathlib.Path):
-    """Download with one authorization per asset.
-
-    - 403: recreate authorization and retry the SAME asset; never rotate media.
-    - 404/410 after a successful live preflight: report stale/missing so the legacy
-      fallback can recover from a file disappearing during the same run.
-    - transient/network errors: refresh tunnel and retry.
-    Persistent 403 aborts immediately because replacing media cannot fix auth.
-    """
     del ignored_request_id, ignored_token
     asset_id = str(item["asset_id"])
     current_status = status
