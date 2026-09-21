@@ -1,1 +1,1 @@
-{"source_run_id":35553959281,"reason":"repair missing Leonidanos watermark from completed checkpoint without rerender","requested_at":"2026-09-21T10:22:44Z"}
+{"source_run_id":35553959281,"reason":"apply approved Supabase Leonidanos watermark to completed checkpoint without rerender","requested_at":"2026-09-21T13:00:00Z","revision":2}
