@@ -19,28 +19,81 @@ def _config() -> tuple[str, str]:
     return base_url, key
 
 
-def _headers(content_type: str) -> dict[str, str]:
+def _auth_headers() -> dict[str, str]:
     _, key = _config()
-    headers = {
-        "apikey": key,
-        "Content-Type": content_type,
-        "Cache-Control": "3600",
-        "x-upsert": "true",
-    }
+    headers = {"apikey": key}
     if not key.startswith("sb_secret_"):
         headers["Authorization"] = f"Bearer {key}"
     return headers
 
 
-def _upload_bytes(bucket: str, object_path: str, data: bytes, content_type: str) -> None:
+def _headers(content_type: str) -> dict[str, str]:
+    headers = {
+        **_auth_headers(),
+        "Content-Type": content_type,
+        "Cache-Control": "3600",
+        "x-upsert": "true",
+    }
+    return headers
+
+
+def _object_url(bucket: str, object_path: str) -> str:
     base_url, _ = _config()
-    url = f"{base_url}/storage/v1/object/{bucket}/{quote(object_path, safe='/')}"
+    return f"{base_url}/storage/v1/object/{bucket}/{quote(object_path, safe='/')}"
+
+
+def _verify_remote_size(bucket: str, object_path: str, expected_size: int) -> None:
+    """Verify the accepted Storage object without using the flaky S3 gateway."""
+    url = _object_url(bucket, object_path)
+    response = requests.head(url, headers=_auth_headers(), timeout=(20, 60))
+    if response.status_code < 400:
+        raw = response.headers.get("Content-Length")
+        if raw is not None and int(raw) == expected_size:
+            return
+
+    # Some Storage deployments do not expose Content-Length on HEAD. Fall back to a
+    # streamed GET so a successful write is never recorded without byte verification.
+    total = 0
+    with requests.get(url, headers=_auth_headers(), timeout=(20, 300), stream=True) as get_response:
+        get_response.raise_for_status()
+        for block in get_response.iter_content(chunk_size=4 * 1024 * 1024):
+            if block:
+                total += len(block)
+    if total != expected_size:
+        raise RuntimeError(
+            f"Storage verification failed for {object_path}: expected={expected_size} remote={total}"
+        )
+
+
+def _upload_bytes(bucket: str, object_path: str, data: bytes, content_type: str) -> None:
+    url = _object_url(bucket, object_path)
     response = requests.post(url, headers=_headers(content_type), data=data, timeout=(30, 600))
     if response.status_code >= 400:
         raise RuntimeError(
-            f"Storage chunk upload failed HTTP {response.status_code} for {object_path}: "
+            f"Storage upload failed HTTP {response.status_code} for {object_path}: "
             f"{response.text[:500]}"
         )
+    _verify_remote_size(bucket, object_path, len(data))
+
+
+def upload_direct_file(
+    local_path: pathlib.Path,
+    *,
+    bucket: str,
+    storage_path: str,
+    content_type: str = "application/octet-stream",
+) -> str:
+    """Upload a small/medium object through Supabase Storage REST and verify it."""
+    local_path = pathlib.Path(local_path)
+    if not local_path.is_file() or local_path.stat().st_size <= 0:
+        raise RuntimeError(f"Direct upload source missing or empty: {local_path}")
+    data = local_path.read_bytes()
+    _upload_bytes(bucket, storage_path, data, content_type)
+    print(
+        f"DIRECT_UPLOAD_OK bucket={bucket} object={storage_path} bytes={len(data)}",
+        flush=True,
+    )
+    return f"supabase://{bucket}/{storage_path}"
 
 
 def upload_file(
