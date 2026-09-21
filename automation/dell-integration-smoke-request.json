@@ -1,12 +1,12 @@
 {
-  "reason": "sweep_active_gta_vi_repository_from_updated_inventory",
+  "reason": "probe_dell_gateway_after_active_catalog_code_fix",
   "publish": false,
   "organized_edit_files": 604,
   "activity_files": 593,
   "distinct_activity_clips": 126,
-  "local_master_files": 11,
   "eligible_collection": "media/gta_vi",
   "eligible_suffix": "-mudo.mp4",
-  "revision": 2,
-  "requested_at": "2026-09-21T23:05:00Z"
+  "gateway_version_expected": "3.0-active-gta-vi",
+  "revision": 3,
+  "requested_at": "2026-09-21T23:18:00Z"
 }
