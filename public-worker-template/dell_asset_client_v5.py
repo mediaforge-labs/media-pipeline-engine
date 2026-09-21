@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Harden Dell asset authorization without changing semantic selection logic.
+"""Harden Dell asset authorization and availability before production selection.
 
-V5 keeps semantic selection from the proven legacy client while hardening transport:
-- one short-lived authorization per selected asset;
+V5 keeps semantic scoring from the proven legacy client while hardening transport:
+- one short-lived authorization per downloaded asset;
 - oversized legacy catalog authorization is bypassed;
 - stale->stale->valid replacement chains keep their semantic mapping correct;
 - a live /health response is authoritative, so an old stored heartbeat cannot block a
-  healthy persistent Dell gateway.
+  healthy persistent Dell gateway;
+- the complete owner-curated catalog is availability-probed before semantic selection,
+  so dead/stale catalog IDs can never consume one of the required unique scene slots.
 """
 
+import concurrent.futures
 import importlib.util
 import inspect
+import json
+import os
 import pathlib
 import time
 import urllib.error
@@ -42,6 +47,7 @@ def _patch_legacy_multihop_mapping() -> None:
 
 _patch_legacy_multihop_mapping()
 _original_control = legacy.control
+_original_choose_unique_pool = legacy.choose_unique_pool
 
 
 def _confirm_live_gateway(status: dict) -> dict:
@@ -51,7 +57,7 @@ def _confirm_live_gateway(status: dict) -> dict:
     try:
         response = legacy.requests.get(
             f"{public_url}/health",
-            headers={"User-Agent": "MediaForge-GitHub/5.3-live-health"},
+            headers={"User-Agent": "MediaForge-GitHub/5.4-live-asset-preflight"},
             timeout=12,
         )
         if response.status_code != 200:
@@ -75,12 +81,14 @@ def _control_v5(action: str, body: dict | None = None):
         asset_ids = list(body.get("asset_ids") or [])
         if len(asset_ids) > 200:
             print(
-                {
-                    "legacy_catalog_authorization_bypassed": True,
-                    "supplied": len(asset_ids),
-                    "gateway_max": 200,
-                    "reason": "v5 uses single-asset authorization",
-                }
+                json.dumps(
+                    {
+                        "legacy_catalog_authorization_bypassed": True,
+                        "supplied": len(asset_ids),
+                        "gateway_max": 200,
+                        "reason": "v5 uses single-asset authorization",
+                    }
+                )
             )
             return {
                 "status": "bypassed",
@@ -120,11 +128,148 @@ def _create_single_asset_request(asset_id: str) -> tuple[str, str]:
     return request_id, token
 
 
+def _probe_authorized_asset(public_url: str, request_id: str, token: str, asset: dict) -> tuple[str, bool | None, str]:
+    """Read one byte from an authorized asset without downloading the whole source.
+
+    ``False`` is reserved for authoritative stale/missing responses (404/410). ``None``
+    means the availability check itself was inconclusive and must abort the preflight;
+    a transient network failure must never cause a valid owner asset to be discarded.
+    """
+    asset_id = str(asset.get("asset_id") or "").strip()
+    if not asset_id:
+        return asset_id, False, "missing asset_id"
+    url = f"{public_url}/asset/{request_id}/{asset_id}"
+    transient_codes = {408, 429, 500, 502, 503, 504}
+    last_error = "unknown"
+    for attempt in range(1, 4):
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "X-MediaForge-Request-Token": token,
+                    "User-Agent": "MediaForge-GitHub/5.4-live-asset-preflight",
+                    "Range": "bytes=0-0",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=45) as response:
+                first_byte = response.read(1)
+                if first_byte:
+                    return asset_id, True, f"HTTP {getattr(response, 'status', 200)}"
+                return asset_id, False, "empty asset response"
+        except urllib.error.HTTPError as exc:
+            last_error = f"HTTP {exc.code}"
+            if exc.code in {404, 410}:
+                return asset_id, False, last_error
+            if exc.code == 403:
+                return asset_id, None, "HTTP 403 during catalog availability preflight"
+            if exc.code not in transient_codes:
+                return asset_id, None, last_error
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        if attempt < 3:
+            time.sleep(attempt)
+    return asset_id, None, last_error
+
+
+def _live_catalog_assets(assets: list[dict]) -> tuple[list[dict], list[str]]:
+    """Return only catalog entries proven readable by the live Dell gateway.
+
+    Requests are authorized in batches below the gateway's 200-ID ceiling. Probes run
+    concurrently but only read a single byte, making this much cheaper than discovering
+    stale IDs while downloading/rendering the final production set.
+    """
+    if not assets:
+        return [], []
+    status = legacy.control("status")
+    public_url = str(status.get("public_url") or "").rstrip("/")
+    if status.get("status") != "online" or not public_url:
+        raise SystemExit("Dell asset gateway is offline during catalog availability preflight")
+
+    batch_size = max(1, min(180, int(os.getenv("MEDIAFORGE_ASSET_PROBE_BATCH", "180"))))
+    workers = max(1, min(16, int(os.getenv("MEDIAFORGE_ASSET_PROBE_WORKERS", "8"))))
+    live_ids: set[str] = set()
+    stale_ids: set[str] = set()
+    inconclusive: list[tuple[str, str]] = []
+
+    for offset in range(0, len(assets), batch_size):
+        batch = assets[offset : offset + batch_size]
+        request_id = uuid.uuid4().hex
+        token = uuid.uuid4().hex + uuid.uuid4().hex
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        legacy.control(
+            "create_request",
+            {
+                "request_id": request_id,
+                "request_token": token,
+                "job_key": f"catalog-live-preflight-{request_id[:8]}",
+                "asset_ids": [str(item["asset_id"]) for item in batch],
+                "expires_at": expires,
+            },
+        )
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(batch))) as executor:
+                futures = [
+                    executor.submit(_probe_authorized_asset, public_url, request_id, token, item)
+                    for item in batch
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    asset_id, is_live, reason = future.result()
+                    if is_live is True:
+                        live_ids.add(asset_id)
+                    elif is_live is False:
+                        stale_ids.add(asset_id)
+                    else:
+                        inconclusive.append((asset_id, reason))
+        finally:
+            _delete_request(request_id)
+
+    if inconclusive:
+        sample = ", ".join(f"{asset_id}:{reason}" for asset_id, reason in inconclusive[:8])
+        raise SystemExit(
+            f"Dell catalog availability preflight was inconclusive for {len(inconclusive)} assets; "
+            f"aborting rather than discarding possibly valid media. Sample: {sample}"
+        )
+
+    live = [item for item in assets if str(item.get("asset_id")) in live_ids]
+    print(
+        json.dumps(
+            {
+                "catalog_availability_preflight": "complete",
+                "catalog_total": len(assets),
+                "live_assets": len(live),
+                "stale_assets": len(stale_ids),
+                "probe_workers": workers,
+            }
+        )
+    )
+    return live, sorted(stale_ids)
+
+
+def choose_unique_pool_live(title: str, script: str, assets: list[dict], max_assets: int, byte_budget: int):
+    """Select semantics only after every candidate has been proven live."""
+    live_assets, stale_ids = _live_catalog_assets(assets)
+    segments = legacy.segment_script(script)
+    words = max(1, len(script.split()))
+    required_unique = max(len(segments), (words + 11) // 12)
+    if len(live_assets) < required_unique:
+        raise SystemExit(
+            "Live GTA VI asset inventory is insufficient before TTS/render: "
+            f"live={len(live_assets)}, required={required_unique}, catalog={len(assets)}, "
+            f"stale={len(stale_ids)}. Refresh/reindex the Dell owner-curated catalog; "
+            "reuse remains disabled."
+        )
+    return _original_choose_unique_pool(title, script, live_assets, max_assets, byte_budget)
+
+
+legacy.choose_unique_pool = choose_unique_pool_live
+
+
 def download_asset(status: dict, ignored_request_id: str, ignored_token: str, item: dict, out: pathlib.Path):
     """Download with one authorization per asset.
 
     - 403: recreate authorization and retry the SAME asset; never rotate media.
-    - 404/410: stale/missing catalog entry; caller may choose a replacement.
+    - 404/410 after a successful live preflight: report stale/missing so the legacy
+      fallback can recover from a file disappearing during the same run.
     - transient/network errors: refresh tunnel and retry.
     Persistent 403 aborts immediately because replacing media cannot fix auth.
     """
@@ -150,7 +295,7 @@ def download_asset(status: dict, ignored_request_id: str, ignored_token: str, it
                 url,
                 headers={
                     "X-MediaForge-Request-Token": token,
-                    "User-Agent": "MediaForge-GitHub/5.3-live-health",
+                    "User-Agent": "MediaForge-GitHub/5.4-live-asset-preflight",
                 },
             )
             with urllib.request.urlopen(request, timeout=1800) as source, part.open("wb") as target:
