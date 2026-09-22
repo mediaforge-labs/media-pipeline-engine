@@ -38,6 +38,57 @@ function Stop-SavedProcess([string]$PidFile,[string[]]$AllowedNames){
   Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
 }
 
+function Test-PublicGateway([string]$Url,[int]$TimeoutSec=8){
+  if([string]::IsNullOrWhiteSpace($Url)){ return $false }
+  try {
+    $health=Invoke-RestMethod -Method Get -Uri ($Url.TrimEnd('/') + '/health') -TimeoutSec $TimeoutSec
+    return ($health.ok -eq $true)
+  } catch {
+    return $false
+  }
+}
+
+function Start-QuickTunnel([int]$Generation){
+  Remove-Item $urlfile,$errlog,$outlog -Force -ErrorAction SilentlyContinue
+  $tunnel=Start-Process $cloudflared -ArgumentList 'tunnel','--url','http://127.0.0.1:8765','--no-autoupdate' -RedirectStandardError $errlog -RedirectStandardOutput $outlog -PassThru -WindowStyle Hidden
+  [System.IO.File]::WriteAllText($tunnelPid,[string]$tunnel.Id,[System.Text.UTF8Encoding]::new($false))
+
+  $url=$null
+  for($i=0;$i -lt 75;$i++){
+    Start-Sleep -Seconds 1
+    if($tunnel.HasExited){ break }
+    foreach($lf in @($errlog,$outlog)){
+      if(Test-Path $lf){
+        $m=Select-String -Path $lf -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -AllMatches | Select-Object -Last 1
+        if($m){ $url=$m.Matches[0].Value; break }
+      }
+    }
+    if($url){ break }
+  }
+
+  if(-not $url){
+    Stop-Process -Id $tunnel.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item $tunnelPid -Force -ErrorAction SilentlyContinue
+    throw "Nao foi possivel obter URL do Cloudflare Tunnel (geracao $Generation). Veja $errlog"
+  }
+
+  $publicReady=$false
+  for($i=0;$i -lt 30;$i++){
+    Start-Sleep -Seconds 1
+    if($tunnel.HasExited){ break }
+    if(Test-PublicGateway $url 10){ $publicReady=$true; break }
+  }
+  if(-not $publicReady){
+    Stop-Process -Id $tunnel.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item $tunnelPid -Force -ErrorAction SilentlyContinue
+    throw "Tunnel recebeu URL, mas /health publico nao respondeu (geracao $Generation). Veja $errlog"
+  }
+
+  [System.IO.File]::WriteAllText($urlfile,$url,[System.Text.UTF8Encoding]::new($false))
+  Write-Host "Gateway publico online (geracao $Generation): $url"
+  return @{ Process=$tunnel; Url=$url }
+}
+
 if(!(Test-Path $a) -or !(Test-Path $s)){ throw 'Credenciais S3 locais ausentes. Rode setup_dell_asset_gateway.ps1.' }
 if(!(Test-Path $Root -PathType Container)){ throw "Biblioteca nao encontrada: $Root" }
 if(!(Test-Path $cloudflared -PathType Leaf)){ throw 'cloudflared ausente. Rode setup_dell_asset_gateway.ps1.' }
@@ -58,9 +109,6 @@ if($LASTEXITCODE -ne 0){ throw 'Falha ao instalar dependencias do gateway.' }
 $gatewayPy=Join-Path $Repo 'tools\dell_asset_gateway.py'
 if(!(Test-Path $gatewayPy)){ throw "Arquivo nao encontrado: $gatewayPy" }
 
-# Always rebuild the metadata-only catalog from the actual Dell repository before
-# serving requests. This prevents a healthy gateway from advertising stale files after
-# media/gta_vi changes. No MP4 is uploaded; only catalog metadata is synchronized.
 Write-Host 'Atualizando catalogo metadata-only a partir do repositorio local...'
 & $py.Source $gatewayPy --root $Root --catalog-file $catalog --sync-catalog
 if($LASTEXITCODE -ne 0){ throw 'Falha ao atualizar o catalogo Dell.' }
@@ -99,52 +147,47 @@ if(-not $localReady){
   throw 'Gateway local nao iniciou em 127.0.0.1:8765.'
 }
 
-$tunnel=Start-Process $cloudflared -ArgumentList 'tunnel','--url','http://127.0.0.1:8765','--no-autoupdate' -RedirectStandardError $errlog -RedirectStandardOutput $outlog -PassThru -WindowStyle Hidden
-[System.IO.File]::WriteAllText($tunnelPid,[string]$tunnel.Id,[System.Text.UTF8Encoding]::new($false))
-
-$url=$null
-for($i=0;$i -lt 75;$i++){
-  Start-Sleep -Seconds 1
-  if($tunnel.HasExited){ break }
-  foreach($lf in @($errlog,$outlog)){
-    if(Test-Path $lf){
-      $m=Select-String -Path $lf -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -AllMatches | Select-Object -Last 1
-      if($m){ $url=$m.Matches[0].Value; break }
-    }
-  }
-  if($url){ break }
-}
-
-if(-not $url){
-  Stop-Process -Id $gateway.Id -Force -ErrorAction SilentlyContinue
-  Stop-Process -Id $tunnel.Id -Force -ErrorAction SilentlyContinue
-  Remove-Item $gatewayPid,$tunnelPid -Force -ErrorAction SilentlyContinue
-  throw "Nao foi possivel obter URL do Cloudflare Tunnel. Veja $errlog"
-}
-
-[System.IO.File]::WriteAllText($urlfile,$url,[System.Text.UTF8Encoding]::new($false))
-
-$publicReady=$false
-for($i=0;$i -lt 30;$i++){
-  Start-Sleep -Seconds 1
-  try {
-    $health=Invoke-RestMethod -Method Get -Uri ($url.TrimEnd('/') + '/health') -TimeoutSec 10
-    if($health.ok -eq $true){ $publicReady=$true; break }
-  } catch { }
-}
-if(-not $publicReady){
-  Stop-Process -Id $gateway.Id -Force -ErrorAction SilentlyContinue
-  Stop-Process -Id $tunnel.Id -Force -ErrorAction SilentlyContinue
-  Remove-Item $gatewayPid,$tunnelPid -Force -ErrorAction SilentlyContinue
-  throw "Tunnel recebeu URL, mas /health publico nao respondeu. Veja $errlog"
-}
-
-Write-Host "Gateway online: $url"
-
+$tunnelInfo=$null
+$generation=1
 try {
-  Wait-Process -Id $gateway.Id
+  $tunnelInfo=Start-QuickTunnel $generation
+  $consecutiveFailures=0
+
+  while(-not $gateway.HasExited){
+    Start-Sleep -Seconds 15
+    if($gateway.HasExited){ break }
+
+    $tunnel=$tunnelInfo.Process
+    $url=$tunnelInfo.Url
+    $healthy=($tunnel -and -not $tunnel.HasExited -and (Test-PublicGateway $url 8))
+
+    if($healthy){
+      $consecutiveFailures=0
+      continue
+    }
+
+    $consecutiveFailures++
+    Write-Host "Watchdog: falha publica $consecutiveFailures/2 em $url"
+    if($consecutiveFailures -lt 2){ continue }
+
+    Write-Host 'Watchdog: reiniciando Cloudflare Quick Tunnel e renovando URL publica...'
+    try {
+      if($tunnel -and -not $tunnel.HasExited){ Stop-Process -Id $tunnel.Id -Force -ErrorAction SilentlyContinue }
+    } catch { }
+    Remove-Item $tunnelPid,$urlfile -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+
+    $generation++
+    $tunnelInfo=Start-QuickTunnel $generation
+    $consecutiveFailures=0
+  }
 }
 finally {
-  Stop-Process -Id $tunnel.Id -Force -ErrorAction SilentlyContinue
+  try {
+    if($tunnelInfo -and $tunnelInfo.Process -and -not $tunnelInfo.Process.HasExited){
+      Stop-Process -Id $tunnelInfo.Process.Id -Force -ErrorAction SilentlyContinue
+    }
+  } catch { }
+  if(-not $gateway.HasExited){ Stop-Process -Id $gateway.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item $gatewayPid,$tunnelPid -Force -ErrorAction SilentlyContinue
 }
