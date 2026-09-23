@@ -7,7 +7,12 @@ on:
       - main
     paths:
       - public-worker-template/dell_asset_client_v6.py
+      - public-worker-template/dell_asset_client_v7.py
       - public-worker-template/factory_worker_v5.py
+      - tools/dell_asset_gateway.py
+      - tools/dell_asset_gateway_v32.py
+      - tools/run_dell_asset_gateway_v32.ps1
+      - tools/setup_dell_asset_gateway_v32.ps1
       - .github/workflows/**
       - docs/CANONICAL_ARCHITECTURE.md
 
@@ -32,11 +37,13 @@ jobs:
         run: |
           set -euo pipefail
           python -m py_compile \
+            public-worker-template/dell_asset_client_v7.py \
             public-worker-template/dell_asset_client_v6.py \
             public-worker-template/dell_asset_client_v5.py \
             public-worker-template/factory_worker_v5.py \
             public-worker-template/factory_worker_v4.py \
-            public-worker-template/factory_worker_v3.py
+            public-worker-template/factory_worker_v3.py \
+            tools/dell_asset_gateway_v32.py
 
       - name: Enforce GitHub-only production architecture
         run: |
@@ -52,7 +59,11 @@ jobs:
           assert 'preferred_backend=eq.github' in factory
 
           worker = Path('public-worker-template/factory_worker_v5.py').read_text(encoding='utf-8')
-          assert 'dell_asset_client_v6.py' in worker
+          assert 'dell_asset_client_v7.py' in worker
+
+          client_v7 = Path('public-worker-template/dell_asset_client_v7.py').read_text(encoding='utf-8')
+          assert 'dell_asset_client_v6.py' in client_v7
+          assert 'automatic endpoint recovery' in client_v7
 
           client = Path('public-worker-template/dell_asset_client_v6.py').read_text(encoding='utf-8')
           assert '3.2-active-gta-vi-rest' in client
@@ -105,4 +116,8 @@ jobs:
           grep -q "scope':'media/gta_vi-active-edit-only'" tools/dell_asset_gateway.py
           grep -q "visual_duplicate_count" tools/dell_asset_gateway.py
           grep -q "quick_hash" tools/dell_asset_gateway.py
-          grep -q "Catalogo pronto:" tools/setup_dell_asset_gateway.ps1
+          grep -q '3.2-active-gta-vi-rest' tools/dell_asset_gateway_v32.py
+          grep -q 'Accept-Ranges' tools/dell_asset_gateway_v32.py
+          grep -q 'range_requests' tools/dell_asset_gateway_v32.py
+          grep -q 'Agendador configurado com reinicio automatico' tools/setup_dell_asset_gateway_v32.ps1
+          grep -q 'Start-TunnelWithRetry' tools/run_dell_asset_gateway_v32.ps1
