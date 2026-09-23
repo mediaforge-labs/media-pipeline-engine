@@ -1,75 +1,11 @@
-name: MediaForge Voice Calibration Trigger
+name: DISABLED - Legacy Calibration Trigger
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - automation/voice-calibration-request.json
-
-permissions:
-  contents: write
-  actions: write
-
-concurrency:
-  group: mediaforge-voice-calibration-trigger
-  cancel-in-progress: false
 
 jobs:
-  dispatch:
+  disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Dispatch PT-BR calibration and record run id
-        shell: bash
-        run: |
-          set -euo pipefail
-          started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-          gh workflow run media-production-test.yml \
-            --repo "$REPO" \
-            --ref main \
-            -f lane=pt-1 \
-            -f job_manifest=jobs/voice-calibration.json
-
-          run_id=""
-          run_url=""
-          for attempt in $(seq 1 30); do
-            row=$(gh api "repos/$REPO/actions/workflows/media-production-test.yml/runs?branch=main&event=workflow_dispatch&per_page=30" \
-              --jq ".workflow_runs | map(select(.created_at >= \"$started\")) | sort_by(.created_at) | last | [.id,.html_url] | @tsv" || true)
-            if [ -n "$row" ] && [ "$row" != "null" ]; then
-              run_id=$(printf '%s' "$row" | cut -f1)
-              run_url=$(printf '%s' "$row" | cut -f2)
-              if [ -n "$run_id" ]; then break; fi
-            fi
-            sleep 10
-          done
-
-          test -n "$run_id" || { echo "Could not resolve calibration run id"; exit 1; }
-          mkdir -p automation
-          cat > automation/voice-calibration-status.json <<EOF
-          {
-            "requested_at": "$started",
-            "lane": "pt-1",
-            "manifest": "jobs/voice-calibration.json",
-            "run_id": $run_id,
-            "run_url": "$run_url",
-            "state": "dispatched"
-          }
-          EOF
-
-          git config user.name "mediaforge-actions"
-          git config user.email "actions@users.noreply.github.com"
-          git add automation/voice-calibration-status.json
-          git commit -m "ops: record voice calibration run $run_id" || true
-          git push origin HEAD:main
-          echo "Calibration run: $run_id"
+      - run: echo 'Disabled to keep a single production architecture.'
