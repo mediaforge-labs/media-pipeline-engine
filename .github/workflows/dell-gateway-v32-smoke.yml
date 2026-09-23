@@ -46,3 +46,28 @@ jobs:
             }
           }
           Write-Host 'Python and PowerShell syntax validation passed.'
+      - name: Validate Dell transport retry classifier
+        shell: pwsh
+        run: |
+          @'
+          import ast
+          import pathlib
+          import re
+
+          path = pathlib.Path('public-worker-template/factory_worker_v5.py')
+          tree = ast.parse(path.read_text(encoding='utf-8'))
+          fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_is_transient_failure_v7')
+          namespace = {
+              're': re,
+              '_original_transient_failure': lambda error: False,
+          }
+          exec(compile(ast.Module(body=[fn], type_ignores=[]), str(path), 'exec'), namespace)
+          classify = namespace['_is_transient_failure_v7']
+
+          assert classify("dell_asset_client_v7.py returned non-zero exit status 1")
+          assert classify("Dell public gateway health check failed: NameResolutionError")
+          assert classify("Dell asset gateway did not become healthy after automatic endpoint recovery")
+          assert not classify("Duplicate assets detected in semantic media map")
+          assert not classify("Factory job has no usable TTS script")
+          print('dell_transport_retry_classifier_ok')
+          '@ | python -
