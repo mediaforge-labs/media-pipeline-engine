@@ -1,1 +1,1 @@
-{"reason":"validate production client v7 and Dell gateway v3.2 recovery; GitHub remains the only render backend","queue_id":"909b09b3-fd21-4ac1-a404-1f5899a40748","requested_at":"2026-09-23T04:11:00Z","revision":13}
+{"reason":"resume queue after Dell gateway v3.2 restored; Dell supplies media only and GitHub performs production","queue_id":"909b09b3-fd21-4ac1-a404-1f5899a40748","requested_at":"2026-09-23T04:36:30Z","revision":14}
