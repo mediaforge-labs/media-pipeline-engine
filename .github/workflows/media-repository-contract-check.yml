@@ -8,8 +8,8 @@ on:
     paths:
       - public-worker-template/dell_asset_client_v6.py
       - public-worker-template/factory_worker_v5.py
-      - .github/workflows/media-factory.yml
-      - .github/workflows/media-repository-contract-check.yml
+      - .github/workflows/**
+      - docs/CANONICAL_ARCHITECTURE.md
 
 permissions:
   contents: read
@@ -38,15 +38,48 @@ jobs:
             public-worker-template/factory_worker_v4.py \
             public-worker-template/factory_worker_v3.py
 
-      - name: Verify workflow uses repository contract gate
+      - name: Enforce GitHub-only production architecture
         run: |
           set -euo pipefail
-          grep -q 'factory_worker_v5.py' .github/workflows/media-factory.yml
-          grep -q 'dell_asset_client_v6.py' public-worker-template/factory_worker_v5.py
-          grep -q '3.2-active-gta-vi-rest' public-worker-template/dell_asset_client_v6.py
-          grep -q 'media/gta_vi-active-edit-only' public-worker-template/dell_asset_client_v6.py
-          grep -q 'media/gta_vi' public-worker-template/dell_asset_client_v6.py
-          grep -q -- '-mudo.mp4' public-worker-template/dell_asset_client_v6.py
+          python - <<'PY'
+          from pathlib import Path
+
+          factory = Path('.github/workflows/media-factory.yml').read_text(encoding='utf-8')
+          assert 'runs-on: ubuntu-latest' in factory
+          assert 'self-hosted' not in factory
+          assert 'Windows, X64' not in factory
+          assert 'factory_worker_v5.py' in factory
+          assert 'preferred_backend=eq.github' in factory
+
+          worker = Path('public-worker-template/factory_worker_v5.py').read_text(encoding='utf-8')
+          assert 'dell_asset_client_v6.py' in worker
+
+          client = Path('public-worker-template/dell_asset_client_v6.py').read_text(encoding='utf-8')
+          assert '3.2-active-gta-vi-rest' in client
+          assert 'media/gta_vi-active-edit-only' in client
+          assert 'media/gta_vi' in client
+          assert '-mudo.mp4' in client
+
+          disabled = [
+              '.github/workflows/media-pipeline.yml',
+              '.github/workflows/media-postprocess-music.yml',
+              '.github/workflows/media-production-test.yml',
+              '.github/workflows/media-dell-canary.yml',
+              '.github/workflows/media-dell-canary-v2.yml',
+              '.github/workflows/media-dell-canary-resume.yml',
+              '.github/workflows/media-dell-integration-smoke.yml',
+              '.github/workflows/media-calibration-trigger.yml',
+              '.github/workflows/canary15-frame-inspect.yml',
+              '.github/workflows/canary15-promote-approved.yml',
+              '.github/workflows/canary15-watermark-repair.yml',
+              '.github/workflows/tmp-leonidanos-factory-e2e-render.yml',
+          ]
+          for filename in disabled:
+              text = Path(filename).read_text(encoding='utf-8')
+              assert 'DISABLED' in text, f'Legacy production path re-enabled: {filename}'
+
+          print('mediaforge_architecture_lock_ok: github_factory_only; dell_supplier_only')
+          PY
 
       - name: Prove repository path normalization
         run: |
