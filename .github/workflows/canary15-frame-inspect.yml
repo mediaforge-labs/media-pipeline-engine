@@ -1,60 +1,11 @@
-name: Canary 15 Frame Inspect
+name: DISABLED - Legacy Canary Frame Inspect
 
 on:
-  push:
-    paths:
-      - 'automation/canary15-frame-inspect-trigger.json'
   workflow_dispatch:
 
-permissions:
-  actions: read
-  contents: read
-
 jobs:
-  inspect:
+  disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: mediaforge-dell-canary-35553959281
-          path: canary15
-          repository: mediaforge-labs/media-pipeline-engine
-          run-id: '35553959281'
-          github-token: ${{ github.token }}
-      - name: Install ffmpeg
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Extract frames
-        run: |
-          set -euo pipefail
-          VIDEO="$(find canary15 -type f -path '*/video/long-form.mp4' -print -quit)"
-          test -n "$VIDEO" && test -s "$VIDEO"
-          ROOT="$(dirname "$(dirname "$VIDEO")")"
-          mkdir -p inspect
-          DURATION="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$VIDEO")"
-          python - "$DURATION" > inspect/timestamps.txt <<'PY'
-          import sys
-          d=float(sys.argv[1])
-          for f in (0.1,0.5,0.9):
-              print(max(1, min(d-1, d*f)))
-          PY
-          i=0
-          while read -r ts; do
-            i=$((i+1))
-            ffmpeg -y -loglevel error -ss "$ts" -i "$VIDEO" -frames:v 1 "inspect/frame-${i}.jpg"
-          done < inspect/timestamps.txt
-          MANIFEST="$(find "$ROOT" -maxdepth 2 -type f -name manifest.json -print | head -1)"
-          [ -n "$MANIFEST" ] && cp "$MANIFEST" inspect/manifest.json || true
-          MEDIA_MANIFEST="$(find "$ROOT" -type f -path '*/media/manifest.json' -print -quit)"
-          [ -n "$MEDIA_MANIFEST" ] && cp "$MEDIA_MANIFEST" inspect/media-manifest.json || true
-          find "$ROOT" -type f -path '*/shorts/*.mp4' -printf '%f\n' | sort > inspect/shorts.txt
-          printf 'video=%s\nduration=%s\nroot=%s\n' "$VIDEO" "$DURATION" "$ROOT" > inspect/inspection.txt
-      - name: Upload inspection
-        uses: actions/upload-artifact@v4
-        with:
-          name: canary15-frame-inspection
-          path: inspect
-          retention-days: 2
+      - run: echo 'Disabled by canonical architecture.'
