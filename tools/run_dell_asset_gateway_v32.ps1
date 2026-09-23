@@ -105,7 +105,7 @@ function Start-TunnelWithRetry([int]$Generation,$GatewayProcess){
     try {
       return Start-QuickTunnel $Generation
     } catch {
-      Write-Warning "Cloudflare indisponivel na tentativa $attempt da geracao $Generation: $($_.Exception.Message)"
+      Write-Warning "Cloudflare indisponivel na tentativa $attempt da geracao ${Generation}: $($_.Exception.Message)"
       Remove-Item $urlfile,$tunnelPid -Force -ErrorAction SilentlyContinue
       Start-Sleep -Seconds ([Math]::Min(30,5 + ($attempt * 5)))
     }
