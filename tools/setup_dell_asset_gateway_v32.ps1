@@ -139,12 +139,12 @@ Remove-ItemProperty -Path $legacyRun -Name 'MediaForgeDellAssetGateway' -ErrorAc
 $quotedRunner='"{0}"' -f $runner
 $quotedRepo='"{0}"' -f $Repo
 $quotedRoot='"{0}"' -f $Root
-$args="-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $quotedRunner -Repo $quotedRepo -Root $quotedRoot"
+$runnerArgs="-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $quotedRunner -Repo $quotedRepo -Root $quotedRoot"
 
 $taskRegistered=$false
 try {
   $identity=[System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-  $action=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $args
+  $action=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $runnerArgs
   $trigger=New-ScheduledTaskTrigger -AtLogOn -User $identity
   $principal=New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
   $settings=New-ScheduledTaskSettingsSet `
@@ -165,7 +165,7 @@ try {
   Write-Host 'Agendador configurado com reinicio automatico.'
 } catch {
   Write-Warning "Nao foi possivel registrar Scheduled Task: $($_.Exception.Message)"
-  $cmd="powershell.exe $args"
+  $cmd="powershell.exe $runnerArgs"
   New-ItemProperty -Path $legacyRun -Name 'MediaForgeDellAssetGateway' -Value $cmd -PropertyType String -Force | Out-Null
   Write-Warning 'Fallback HKCU Run configurado.'
 }
@@ -175,7 +175,7 @@ try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } cat
 if($taskRegistered){
   Start-ScheduledTask -TaskName $TaskName
 } else {
-  Start-Process powershell.exe -ArgumentList $args -WindowStyle Hidden | Out-Null
+  Start-Process powershell.exe -ArgumentList $runnerArgs -WindowStyle Hidden | Out-Null
 }
 
 $ready=$false
