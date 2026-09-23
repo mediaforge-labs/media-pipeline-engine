@@ -1,95 +1,11 @@
-name: Canary 15 Promote Approved Review
+name: DISABLED - Legacy Canary Promotion
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - automation/canary15-promote-approved.json
   workflow_dispatch:
 
-permissions:
-  actions: read
-  contents: read
-
 jobs:
-  promote:
+  disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
-      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-      QUEUE_ID: 530e6f9a-7c9d-4cb8-b0a6-69e4ac8fc00c
-      VARIANT_ID: 67b73244-768f-4e1d-868c-6969c5598192
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: '3.11'}
-      - name: Install dependencies
-        run: |
-          pip install --no-cache-dir requests
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-          python -m py_compile public-worker-template/supabase_chunked.py
-      - name: Download approved watermarked artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: canary15-watermarked-review
-          path: approved
-          repository: mediaforge-labs/media-pipeline-engine
-          run-id: '35603458203'
-          github-token: ${{ github.token }}
-      - name: Validate approved candidate
-        run: |
-          set -euo pipefail
-          test -s approved/long-form.mp4
-          ffprobe -v error -show_entries format=duration,size -of json approved/long-form.mp4
-          test -s approved/frame-0.1.jpg
-          test -s approved/frame-0.5.jpg
-          test -s approved/frame-0.9.jpg
-      - name: Upload approved video as verified chunks and patch exact PT checkpoint
-        env:
-          PYTHONPATH: public-worker-template
-        run: |
-          python - <<'PY'
-          import os, pathlib, requests
-          import supabase_chunked
-
-          q=os.environ['QUEUE_ID']; vid=os.environ['VARIANT_ID']
-          base_url=os.environ['SUPABASE_URL'].rstrip('/')
-          key_secret=os.environ['SUPABASE_SECRET_KEY'].strip()
-          p=pathlib.Path('approved/long-form.mp4')
-          if not p.is_file() or p.stat().st_size < 100000:
-              raise SystemExit('approved video missing/small')
-
-          bucket='mediaforge-assets'
-          storage_path=f"renders/{q}/pt-BR/approved-canary-35603458203/long-form.mp4"
-          uri=supabase_chunked.upload_file(
-              p,
-              bucket=bucket,
-              storage_path=storage_path,
-              content_type='video/mp4',
-          )
-
-          api_headers={'apikey':key_secret,'Content-Type':'application/json','Prefer':'return=representation'}
-          if not key_secret.startswith('sb_secret_'):
-              api_headers['Authorization']='Bearer '+key_secret
-          url=base_url+'/rest/v1/youtube_video_variants'
-          payload={
-              'video_url':uri,
-              'render_version':'mediaforge-github-v10-approved-watermark-chunked',
-              'status':'upload_ready',
-              'last_error':None,
-          }
-          r=requests.patch(
-              url,
-              headers=api_headers,
-              params={'id':f'eq.{vid}','queue_id':f'eq.{q}','locale':'eq.pt-BR'},
-              json=payload,
-              timeout=30,
-          )
-          r.raise_for_status()
-          rows=r.json()
-          if len(rows)!=1:
-              raise SystemExit(f'checkpoint patch mismatch: {len(rows)}')
-          print('PROMOTED',q,vid,uri,p.stat().st_size)
-          PY
+      - run: echo 'Disabled by canonical architecture.'
