@@ -10,6 +10,20 @@ import supabase_chunked
 
 CHUNKED_UPLOAD_THRESHOLD = 40 * 1024 * 1024
 
+# Supabase Storage rejects some platform-specific aliases returned by Python's
+# mimetypes module. Keep production uploads on canonical supported MIME types.
+MIME_OVERRIDES = {
+    ".wav": "audio/wav",
+    ".srt": "text/plain",
+}
+
+
+def production_content_type(local_path: pathlib.Path) -> str:
+    override = MIME_OVERRIDES.get(local_path.suffix.lower())
+    if override:
+        return override
+    return mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"
+
 
 def resilient_storage_upload(client, local_path: pathlib.Path, storage_path: str) -> str:
     """Use Supabase Storage REST for every production object.
@@ -25,7 +39,7 @@ def resilient_storage_upload(client, local_path: pathlib.Path, storage_path: str
         raise RuntimeError(f"Output file missing: {local_path}")
 
     size = local_path.stat().st_size
-    content_type = mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"
+    content_type = production_content_type(local_path)
     if size <= CHUNKED_UPLOAD_THRESHOLD:
         return supabase_chunked.upload_direct_file(
             local_path,
