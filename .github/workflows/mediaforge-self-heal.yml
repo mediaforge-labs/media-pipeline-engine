@@ -4,8 +4,6 @@ on:
   workflow_run:
     workflows:
       - MediaForge Production Factory
-      - MediaForge Dell Canary
-      - MediaForge Dell Canary Resume
     types: [completed]
   workflow_dispatch:
   push:
@@ -31,7 +29,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
 
     steps:
-      - name: Resolve failed MediaForge run
+      - name: Resolve failed canonical MediaForge run
         id: target
         shell: bash
         run: |
@@ -45,14 +43,14 @@ jobs:
           else
             ROW="$(gh api "repos/$REPO/actions/runs?status=completed&per_page=50" --jq '
               .workflow_runs
-              | map(select((.name == "MediaForge Production Factory" or .name == "MediaForge Dell Canary" or .name == "MediaForge Dell Canary Resume") and (.conclusion != "success" and .conclusion != "skipped")))
+              | map(select(.name == "MediaForge Production Factory" and (.conclusion != "success" and .conclusion != "skipped")))
               | sort_by(.updated_at)
               | reverse
               | .[0] // empty
             ')"
             if [ -z "$ROW" ] || [ "$ROW" = "null" ]; then
               echo 'has_target=false' >> "$GITHUB_OUTPUT"
-              echo 'No failed MediaForge run found.'
+              echo 'No failed canonical MediaForge run found.'
               exit 0
             fi
 
@@ -76,9 +74,15 @@ jobs:
           PY
             then
               echo 'has_target=false' >> "$GITHUB_OUTPUT"
-              echo 'Latest failed run is older than 6 hours; manual/push validation will not reopen stale failures.'
+              echo 'Latest failed run is older than 6 hours; validation will not reopen stale failures.'
               exit 0
             fi
+          fi
+
+          if [ "$RUN_NAME" != 'MediaForge Production Factory' ]; then
+            echo 'has_target=false' >> "$GITHUB_OUTPUT"
+            echo "Ignoring non-canonical workflow: $RUN_NAME"
+            exit 0
           fi
 
           echo "has_target=true" >> "$GITHUB_OUTPUT"
@@ -90,6 +94,8 @@ jobs:
           {
             echo '# MediaForge Self Heal'
             echo
+            echo '- Architecture: GitHub-hosted production only'
+            echo '- Dell role: media supplier only'
             echo "- Workflow: $RUN_NAME"
             echo "- Run: $RUN_ID"
             echo "- Attempt: $RUN_ATTEMPT"
@@ -205,14 +211,14 @@ jobs:
           compression-level: 6
           if-no-files-found: error
 
-      - name: Auto-rerun transient failure
+      - name: Auto-rerun transient failure on GitHub
         if: ${{ steps.classify.outputs.can_retry == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           RUN_ID='${{ steps.target.outputs.run_id }}'
           gh api --method POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs"
-          echo 'Transient failure: failed jobs were automatically re-run.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Transient failure: canonical GitHub factory jobs were automatically re-run.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Escalate deterministic or unknown failure
         if: ${{ steps.collect.outputs.has_failed_jobs == 'true' && steps.classify.outputs.retryable != 'true' }}
@@ -222,10 +228,11 @@ jobs:
             echo
             echo 'Automatic retry intentionally skipped to avoid wasting another expensive render.'
             echo 'Diagnostics were preserved for code remediation and checkpoint-aware resume.'
+            echo 'No Dell/local fallback is permitted.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stop retry loop after maximum attempts
         if: ${{ steps.classify.outputs.maxed == 'true' }}
         shell: bash
         run: |
-          echo 'Maximum automatic retry attempts reached; diagnostics preserved for remediation.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Maximum automatic retry attempts reached; diagnostics preserved for remediation. No Dell fallback is permitted.' >> "$GITHUB_STEP_SUMMARY"
