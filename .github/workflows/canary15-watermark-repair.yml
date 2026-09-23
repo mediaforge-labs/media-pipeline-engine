@@ -1,67 +1,11 @@
-name: Canary 15 Watermark Repair
+name: DISABLED - Legacy Canary Watermark Repair
 
 on:
-  push:
-    paths:
-      - automation/canary15-watermark-repair-trigger.json
   workflow_dispatch:
 
-permissions:
-  actions: read
-  contents: read
-
 jobs:
-  repair:
+  disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - name: Download completed Canary 15 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: mediaforge-dell-canary-35553959281
-          path: canary15
-          repository: mediaforge-labs/media-pipeline-engine
-          run-id: '35553959281'
-          github-token: ${{ github.token }}
-      - name: Install ffmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Fetch approved Leonidanos watermark from Supabase
-        run: |
-          set -euo pipefail
-          mkdir -p repaired approved-assets
-          URL='https://rhddgfvtrkmusbvphnlg.supabase.co/storage/v1/object/public/blog-images/social-assets/leonidanos-logo.png'
-          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 "$URL" -o approved-assets/leonidanos-logo.png
-          test -s approved-assets/leonidanos-logo.png
-          file approved-assets/leonidanos-logo.png | grep -qi 'PNG image data'
-          echo "LOGO=approved-assets/leonidanos-logo.png" >> "$GITHUB_ENV"
-      - name: Apply watermark without rerendering narration/media
-        run: |
-          set -euo pipefail
-          VIDEO="$(find canary15 -type f -path '*/video/long-form.mp4' -print -quit)"
-          test -n "$VIDEO" && test -s "$VIDEO"
-          ffmpeg -y -loglevel error -i "$VIDEO" -i "$LOGO" \
-            -filter_complex "[1:v]scale='min(220,iw)':-1,format=rgba,colorchannelmixer=aa=0.72[wm];[0:v][wm]overlay=W-w-36:H-h-32:format=auto[v]" \
-            -map '[v]' -map 0:a? -c:v libx264 -preset fast -crf 18 -c:a copy -movflags +faststart repaired/long-form.mp4
-          test -s repaired/long-form.mp4
-          ffprobe -v error -show_entries format=duration,size -of json repaired/long-form.mp4 > repaired/ffprobe.json
-          for f in 0.1 0.5 0.9; do
-            D="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 repaired/long-form.mp4)"
-            TS="$(python -c "print(max(1,float('$D')*float('$f')))" )"
-            ffmpeg -y -loglevel error -ss "$TS" -i repaired/long-form.mp4 -frames:v 1 "repaired/frame-${f}.jpg"
-          done
-      - name: Preserve manifests and Shorts inventory
-        run: |
-          set -euo pipefail
-          find canary15 -type f -name manifest.json -print > repaired/manifests.txt
-          find canary15 -type f -path '*/shorts/*.mp4' -printf '%p\n' | sort > repaired/shorts.txt
-          test "$(wc -l < repaired/shorts.txt)" -ge 5
-      - name: Upload repaired private-review candidate
-        uses: actions/upload-artifact@v4
-        with:
-          name: canary15-watermarked-review
-          path: repaired
-          compression-level: 0
-          retention-days: 2
+      - run: echo 'Disabled by canonical architecture.'
