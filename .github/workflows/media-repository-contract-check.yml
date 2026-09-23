@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           grep -q 'factory_worker_v5.py' .github/workflows/media-factory.yml
           grep -q 'dell_asset_client_v6.py' public-worker-template/factory_worker_v5.py
-          grep -q '3.0-active-gta-vi' public-worker-template/dell_asset_client_v6.py
+          grep -q '3.2-active-gta-vi-rest' public-worker-template/dell_asset_client_v6.py
           grep -q 'media/gta_vi-active-edit-only' public-worker-template/dell_asset_client_v6.py
           grep -q 'media/gta_vi' public-worker-template/dell_asset_client_v6.py
           grep -q -- '-mudo.mp4' public-worker-template/dell_asset_client_v6.py
