@@ -3,8 +3,11 @@ from __future__ import annotations
 
 """Fail-fast contract gate for the current Dell GTA VI repository.
 
-The Dell is a media host only. GitHub-hosted MediaForge workers validate the remote
-catalog, select assets, download only the required files, and perform all rendering.
+The authoritative editing repository is ``media/gta_vi``. Production is allowed to
+continue only when the Dell gateway exposes the v3 active catalog, every eligible item
+is a silent ``-mudo.mp4`` edit asset under that collection, and the public gateway
+health endpoint agrees with the stored catalog. After the contract is proven, the
+hardened v5 client performs live availability probing, semantic selection and download.
 """
 
 import json
@@ -25,15 +28,13 @@ MIN_UNIQUE_ASSETS = 126
 def control(action: str) -> dict:
     base = os.environ["SUPABASE_URL"].rstrip("/")
     key = os.environ["SUPABASE_SECRET_KEY"]
-    headers = {
-        "apikey": key,
-        "User-Agent": "MediaForge-GitHub/6.2-repository-contract",
-    }
-    if not key.startswith("sb_secret_"):
-        headers["Authorization"] = f"Bearer {key}"
     response = requests.get(
         f"{base}/functions/v1/mediaforge-dell-control",
-        headers=headers,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "User-Agent": "MediaForge-GitHub/6.1-repository-contract",
+        },
         params={"action": action},
         timeout=60,
     )
@@ -56,7 +57,7 @@ def fetch_live_health(status: dict) -> dict:
     try:
         response = requests.get(
             public_url + "/health",
-            headers={"User-Agent": "MediaForge-GitHub/6.2-repository-contract"},
+            headers={"User-Agent": "MediaForge-GitHub/6.1-repository-contract"},
             timeout=20,
         )
         response.raise_for_status()
@@ -72,10 +73,14 @@ def validate_catalog(status: dict, catalog: dict) -> None:
     if status.get("status") != "online" or not status.get("public_url"):
         raise SystemExit("Dell gateway is not online before production")
 
+    # The control-row heartbeat is eventually consistent and can become stale even while
+    # the persistent Dell gateway/tunnel is serving traffic normally. Probe the live
+    # endpoint first; a healthy v3 endpoint is authoritative for liveness. We still log
+    # whether the stored heartbeat was fresh so control-plane drift remains observable.
     health = fetch_live_health(status)
     if str(health.get("version") or "") != EXPECTED_GATEWAY_VERSION:
         raise SystemExit(
-            f"Dell live gateway version mismatch: health.version={health.get('version')!r}, "
+            f"Dell live gateway is obsolete: health.version={health.get('version')!r}, "
             f"expected={EXPECTED_GATEWAY_VERSION!r}"
         )
 
@@ -90,8 +95,9 @@ def validate_catalog(status: dict, catalog: dict) -> None:
     gateway_version = str(catalog.get("gateway_version") or status.get("gateway_version") or "")
     if gateway_version != EXPECTED_GATEWAY_VERSION:
         raise SystemExit(
-            "Dell catalog version does not match the active gateway: "
-            f"gateway_version={gateway_version!r}, expected={EXPECTED_GATEWAY_VERSION!r}."
+            "Dell catalog is from an obsolete repository layout: "
+            f"gateway_version={gateway_version!r}, expected={EXPECTED_GATEWAY_VERSION!r}. "
+            "Run tools/setup_dell_asset_gateway.ps1 on the Dell after git pull."
         )
 
     scope = str(catalog.get("scope") or "")
@@ -102,10 +108,7 @@ def validate_catalog(status: dict, catalog: dict) -> None:
         )
 
     assets = list(catalog.get("assets") or [])
-    baseline = max(
-        MIN_UNIQUE_ASSETS,
-        int(os.getenv("MEDIAFORGE_ACTIVE_GTA_VI_BASELINE", str(MIN_UNIQUE_ASSETS))),
-    )
+    baseline = max(MIN_UNIQUE_ASSETS, int(os.getenv("MEDIAFORGE_ACTIVE_GTA_VI_BASELINE", str(MIN_UNIQUE_ASSETS))))
     if len(assets) < baseline:
         raise SystemExit(
             f"Dell active repository has only {len(assets)} unique edit assets; baseline is {baseline}."
@@ -151,14 +154,13 @@ def validate_catalog(status: dict, catalog: dict) -> None:
     if health_count != len(assets):
         raise SystemExit(
             "Dell gateway memory/catalog mismatch before production: "
-            f"health={health_count}, stored_catalog={len(assets)}."
+            f"health={health_count}, stored_catalog={len(assets)}. Restart the gateway after catalog refresh."
         )
 
     print(
         json.dumps(
             {
                 "repository_contract": "validated",
-                "architecture": "dell-media-host__github-render",
                 "gateway_version": gateway_version,
                 "scope": scope,
                 "unique_edit_assets": len(assets),
