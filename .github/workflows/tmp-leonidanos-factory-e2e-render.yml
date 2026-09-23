@@ -1,93 +1,11 @@
-name: TEMP Leonidanos Factory E2E - Render
+name: DISABLED - Temporary Leonidanos E2E Render
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/tmp-leonidanos-factory-e2e-render.yml
-
-permissions:
-  contents: read
-
-concurrency:
-  group: tmp-leonidanos-factory-e2e-render
-  cancel-in-progress: false
+  workflow_dispatch:
 
 jobs:
-  render:
+  disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 300
-    env:
-      SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
-      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
-      MEDIAFORGE_TTS_PROVIDER: chatterbox
-      MEDIAFORGE_TTS_MAX_WORKERS: '1'
-      MEDIAFORGE_TTS_STRICT_CHUNK_ORDER: '1'
     steps:
-      - name: Checkout clean factory
-        uses: actions/checkout@v4
-        with:
-          repository: mediaforge-labs/leonidanos-factory
-          ref: main
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-          cache-dependency-path: |
-            public-worker-template/requirements.txt
-            public-worker-template/requirements-production.txt
-      - name: Verify render secrets
-        env:
-          CORE_BUNDLE_B64: ${{ secrets.MEDIAFORGE_CORE_BUNDLE_B64 }}
-          VOICE_REFERENCE_B64: ${{ secrets.MEDIAFORGE_VOICE_REFERENCE_B64 }}
-        run: |
-          set -euo pipefail
-          test -n "$SUPABASE_SECRET_KEY" || { echo 'Supabase service secret missing'; exit 1; }
-          test -n "$MEDIAFORGE_CORE_KEY_B64" || { echo 'MEDIAFORGE_CORE_KEY_B64 missing'; exit 1; }
-          test -n "$CORE_BUNDLE_B64" || { echo 'MEDIAFORGE_CORE_BUNDLE_B64 missing'; exit 1; }
-          test -n "$VOICE_REFERENCE_B64" || { echo 'MEDIAFORGE_VOICE_REFERENCE_B64 missing'; exit 1; }
-      - name: Wait for clean PT and EN jobs
-        run: |
-          set -euo pipefail
-          auth=(-H "apikey: $SUPABASE_SECRET_KEY")
-          if [[ "$SUPABASE_SECRET_KEY" != sb_secret_* ]]; then auth+=(-H "Authorization: Bearer $SUPABASE_SECRET_KEY"); fi
-          for i in $(seq 1 60); do
-            PT="$(curl --fail --silent --show-error --get "$SUPABASE_URL/rest/v1/youtube_factory_jobs" "${auth[@]}" --data-urlencode 'select=id' --data-urlencode 'status=eq.pending' --data-urlencode 'locale=eq.pt-BR' --data-urlencode 'metadata->>prepared_by=eq.leonidanos-factory' --data-urlencode 'limit=1')"
-            EN="$(curl --fail --silent --show-error --get "$SUPABASE_URL/rest/v1/youtube_factory_jobs" "${auth[@]}" --data-urlencode 'select=id' --data-urlencode 'status=eq.pending' --data-urlencode 'locale=eq.en-US' --data-urlencode 'metadata->>prepared_by=eq.leonidanos-factory' --data-urlencode 'limit=1')"
-            if [ "$PT" != '[]' ] && [ "$EN" != '[]' ]; then echo 'Clean PT + EN pair detected.'; exit 0; fi
-            sleep 10
-          done
-          echo 'Timed out waiting for clean PT + EN factory jobs.'
-          exit 1
-      - name: Install production dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip setuptools wheel
-          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchaudio==2.6.0
-          pip install -r public-worker-template/requirements.txt
-          pip install -r public-worker-template/requirements-production.txt
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Materialize clean pre-Dell core and voice
-        env:
-          CORE_BUNDLE_B64: ${{ secrets.MEDIAFORGE_CORE_BUNDLE_B64 }}
-          VOICE_REFERENCE_B64: ${{ secrets.MEDIAFORGE_VOICE_REFERENCE_B64 }}
-        run: |
-          set -euo pipefail
-          mkdir -p .runtime
-          printf '%s' "$CORE_BUNDLE_B64" | base64 --decode > .runtime/core.bundle.enc
-          printf '%s' "$VOICE_REFERENCE_B64" | base64 --decode > .runtime/voice-reference.ogg
-          ffmpeg -y -loglevel error -i .runtime/voice-reference.ogg -vn -ac 1 -ar 24000 -c:a pcm_s16le .runtime/voice-reference.wav
-          test -s .runtime/core.bundle.enc
-          test -s .runtime/voice-reference.wav
-          echo "MEDIAFORGE_BUNDLE_PATH=$(realpath .runtime/core.bundle.enc)" >> "$GITHUB_ENV"
-          echo "MEDIAFORGE_VOICE_REFERENCE_PATH=$(realpath .runtime/voice-reference.wav)" >> "$GITHUB_ENV"
-      - name: Render controlled PT
-        run: |
-          set -euo pipefail
-          python public-worker-template/factory_worker.py --lane pt-e2e --locale pt-BR --bundle "$MEDIAFORGE_BUNDLE_PATH" --worker public-worker-template/worker.py --output-dir out/pt-e2e
-      - name: Render controlled EN
-        run: |
-          set -euo pipefail
-          python public-worker-template/factory_worker.py --lane en-e2e --locale en-US --bundle "$MEDIAFORGE_BUNDLE_PATH" --worker public-worker-template/worker.py --output-dir out/en-e2e
+      - run: echo 'Disabled. Canonical production is MediaForge Production Factory.'
