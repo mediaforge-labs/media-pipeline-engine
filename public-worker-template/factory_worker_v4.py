@@ -11,7 +11,7 @@ import factory_worker_v3 as impl
 import factory_worker_v3_resilient as resilient  # patches all production uploads to verified REST storage
 
 APPROVED_WATERMARK_URL = (
-    "https://rhddgfvtrkmusbvphnlg.supabase.co/storage/v1/object/public/"
+    "https://cwxadcrtnbciziexbili.supabase.co/storage/v1/object/public/"
     "blog-images/social-assets/leonidanos-logo.png"
 )
 WATERMARK_RENDER_VERSION = "mediaforge-github-v10-strict-watermarked-shorts-v2"
