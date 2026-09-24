@@ -32,6 +32,28 @@ jobs:
         with: {ref: main}
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
+      - name: Validate Supabase credential shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          key = os.environ.get('SUPABASE_SECRET_KEY', '')
+          if key.startswith('sb_secret_'):
+              kind = 'sb_secret'
+          elif key.startswith('eyJ') and key.count('.') == 2:
+              kind = 'legacy_service_role_jwt'
+          elif key.startswith('SUPABASE_SECRET_KEY='):
+              kind = 'assignment_pasted_instead_of_value'
+          else:
+              kind = 'unknown'
+          print(f'credential_kind={kind}')
+          print(f'credential_length={len(key)}')
+          print(f'leading_or_trailing_whitespace={key != key.strip()}')
+          print(f'wrapped_in_quotes={len(key) >= 2 and key[0] in chr(34)+chr(39) and key[-1] == key[0]}')
+          if not key:
+              raise SystemExit('SUPABASE_SECRET_KEY is empty')
+          PY
       - name: Install preflight dependencies
         run: |
           set -euo pipefail
