@@ -28,7 +28,7 @@ jobs:
       - name: Probe Supabase queue
         id: queue
         env:
-          SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+          SUPABASE_URL: https://cwxadcrtnbciziexbili.supabase.co
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
           set -euo pipefail
@@ -155,7 +155,7 @@ jobs:
 
       - name: Lease and process next factory job
         env:
-          SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+          SUPABASE_URL: https://cwxadcrtnbciziexbili.supabase.co
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           MEDIAFORGE_CORE_KEY_B64: ${{ secrets.MEDIAFORGE_CORE_KEY_B64 }}
           MEDIAFORGE_TTS_PROVIDER: chatterbox
