@@ -25,6 +25,12 @@ if spec is None or spec.loader is None:
 legacy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(legacy)
 
+# Leonidanos Supabase cutover. Override the legacy module's storage target without
+# duplicating the proven gateway implementation.
+legacy.PROJECT_REF = "cwxadcrtnbciziexbili"
+legacy.REGION = "us-east-1"
+legacy.ENDPOINT = f"https://{legacy.PROJECT_REF}.storage.supabase.co/storage/v1/s3"
+
 GATEWAY_VERSION = "3.2-active-gta-vi-rest"
 legacy.GATEWAY_VERSION = GATEWAY_VERSION
 
