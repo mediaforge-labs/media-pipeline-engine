@@ -1,0 +1,226 @@
+name: TEMP - Upload Leonidanos PC and HUD Four Variants
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/tmp-leonidanos-upload-four.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tmp-leonidanos-upload-four
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      NEW_SUPABASE_URL: https://cwxadcrtnbciziexbili.supabase.co
+      NEW_SUPABASE_SECRET: ${{ secrets.SUPABASE_SECRET_KEY }}
+      OLD_SUPABASE_URL: https://rhddgfvtrkmusbvphnlg.supabase.co
+      OLD_SUPABASE_SECRET: ${{ secrets.OLD_SUPABASE_SECRET }}
+      YOUTUBE_PT_CLIENT_ID: ${{ secrets.YOUTUBE_PT_CLIENT_ID }}
+      YOUTUBE_PT_CLIENT_SECRET: ${{ secrets.YOUTUBE_PT_CLIENT_SECRET }}
+      YOUTUBE_PT_REFRESH_TOKEN: ${{ secrets.YOUTUBE_PT_REFRESH_TOKEN }}
+      YOUTUBE_EN_CLIENT_ID: ${{ secrets.YOUTUBE_EN_CLIENT_ID }}
+      YOUTUBE_EN_CLIENT_SECRET: ${{ secrets.YOUTUBE_EN_CLIENT_SECRET }}
+      YOUTUBE_EN_REFRESH_TOKEN: ${{ secrets.YOUTUBE_EN_REFRESH_TOKEN }}
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check upload secrets
+        id: secrets
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          required = [
+            'NEW_SUPABASE_SECRET','OLD_SUPABASE_SECRET',
+            'YOUTUBE_PT_CLIENT_ID','YOUTUBE_PT_CLIENT_SECRET','YOUTUBE_PT_REFRESH_TOKEN',
+            'YOUTUBE_EN_CLIENT_ID','YOUTUBE_EN_CLIENT_SECRET','YOUTUBE_EN_REFRESH_TOKEN'
+          ]
+          missing=[n for n in required if not os.environ.get(n,'')]
+          print('missing=' + ','.join(missing))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            f.write('ready=' + ('true' if not missing else 'false') + '\n')
+          PY
+
+      - name: Stop safely until secrets are copied
+        if: steps.secrets.outputs.ready != 'true'
+        run: |
+          echo 'Uploader prepared, but required secrets are missing in mediaforge-labs/media-pipeline-engine.'
+          echo 'No video was uploaded and no database status was changed.'
+
+      - name: Install uploader dependencies
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir requests google-api-python-client google-auth
+
+      - name: Upload two contents to PT and EN channels as PRIVATE
+        if: steps.secrets.outputs.ready == 'true'
+        shell: bash
+        run: |
+          cat > /tmp/upload_leonidanos_four.py <<'PY'
+          import hashlib, json, os, tempfile, time
+          from pathlib import Path
+          from urllib.parse import quote
+          import requests
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          NEW_URL=os.environ['NEW_SUPABASE_URL'].rstrip('/')
+          NEW_KEY=os.environ['NEW_SUPABASE_SECRET'].strip()
+          OLD_URL=os.environ['OLD_SUPABASE_URL'].rstrip('/')
+          OLD_KEY=os.environ['OLD_SUPABASE_SECRET'].strip()
+
+          TARGETS=[
+            ('31f6af7c-5c78-4aa2-9902-621440ed053f','pt-BR','UCD4WcXAVQLhzfC5kDGNs0YA'),
+            ('31f6af7c-5c78-4aa2-9902-621440ed053f','en-US','UCOZqflyc-1iv1CCRpvWPHwQ'),
+            ('dc754320-53ea-4437-8017-4707747c4ed9','pt-BR','UCD4WcXAVQLhzfC5kDGNs0YA'),
+            ('dc754320-53ea-4437-8017-4707747c4ed9','en-US','UCOZqflyc-1iv1CCRpvWPHwQ'),
+          ]
+
+          def headers(key, json_ct=False):
+            h={'apikey':key}
+            if not key.startswith('sb_secret_'):
+              h['Authorization']=f'Bearer {key}'
+            if json_ct: h['Content-Type']='application/json'
+            return h
+
+          def new_get(table, params):
+            r=requests.get(f'{NEW_URL}/rest/v1/{table}',headers=headers(NEW_KEY),params=params,timeout=60)
+            r.raise_for_status(); return r.json()
+
+          def new_patch(table, filters, payload):
+            h=headers(NEW_KEY, True); h['Prefer']='return=representation'
+            r=requests.patch(f'{NEW_URL}/rest/v1/{table}',headers=h,params=filters,json=payload,timeout=60)
+            r.raise_for_status(); return r.json()
+
+          def fetch_variant(queue_id, locale):
+            rows=new_get('youtube_video_variants',{
+              'select':'id,queue_id,locale,channel_key,status,youtube_title,youtube_description,video_url,youtube_video_id,youtube_permalink,youtube_privacy_status,attempts,render_version',
+              'queue_id':f'eq.{queue_id}','locale':f'eq.{locale}','limit':'1'
+            })
+            if not rows: raise RuntimeError(f'Variant not found: {queue_id} {locale}')
+            v=rows[0]
+            if v.get('youtube_privacy_status')!='private': raise RuntimeError('Safety block: privacy must be private')
+            if not str(v.get('render_version') or '').startswith('mediaforge-github-v10-strict-watermarked-shorts-v2'):
+              raise RuntimeError(f'Unexpected render_version: {v.get("render_version")}')
+            return v
+
+          def old_storage_get(bucket, object_path, stream=False, timeout=(30,600)):
+            url=f'{OLD_URL}/storage/v1/object/{bucket}/{quote(object_path,safe="/")}'
+            r=requests.get(url,headers=headers(OLD_KEY),stream=stream,timeout=timeout)
+            r.raise_for_status(); return r
+
+          def parse_chunked(uri):
+            prefix='supabase-chunked://'
+            if not uri.startswith(prefix): raise RuntimeError(f'Expected chunked URI: {uri}')
+            rest=uri[len(prefix):]
+            bucket,path=rest.split('/',1)
+            return bucket,path
+
+          def download_chunked(uri, destination):
+            bucket,manifest_path=parse_chunked(uri)
+            manifest=old_storage_get(bucket,manifest_path,False,(30,120)).json()
+            chunks=manifest.get('chunks') or []
+            total=int(manifest.get('total_size') or 0)
+            expected_sha=str(manifest.get('sha256') or '')
+            if not chunks or total < 100000 or len(expected_sha)!=64: raise RuntimeError('Invalid chunk manifest')
+            h=hashlib.sha256(); written=0
+            with destination.open('wb') as out:
+              for i,item in enumerate(chunks):
+                if int(item.get('index',-1))!=i: raise RuntimeError('Chunk order mismatch')
+                path=str(item['object_path']); expected=int(item['size']); expected_chunk=str(item['sha256'])
+                r=old_storage_get(bucket,path,True,(30,600))
+                ch=hashlib.sha256(); size=0
+                with r:
+                  for data in r.iter_content(chunk_size=8*1024*1024):
+                    if data:
+                      out.write(data); h.update(data); ch.update(data); size+=len(data); written+=len(data)
+                if size!=expected or ch.hexdigest()!=expected_chunk: raise RuntimeError(f'Chunk validation failed: {i}')
+                print(f'chunk {i+1}/{len(chunks)} {written}/{total}')
+            if written!=total or h.hexdigest()!=expected_sha: raise RuntimeError('Final video validation failed')
+
+          def yt(locale):
+            p='PT' if locale=='pt-BR' else 'EN'
+            creds=Credentials(
+              token=None,
+              refresh_token=os.environ[f'YOUTUBE_{p}_REFRESH_TOKEN'],
+              token_uri='https://oauth2.googleapis.com/token',
+              client_id=os.environ[f'YOUTUBE_{p}_CLIENT_ID'],
+              client_secret=os.environ[f'YOUTUBE_{p}_CLIENT_SECRET'],
+              scopes=['https://www.googleapis.com/auth/youtube.upload','https://www.googleapis.com/auth/youtube']
+            )
+            return build('youtube','v3',credentials=creds,cache_discovery=False)
+
+          def verify_channel(youtube, expected):
+            data=youtube.channels().list(part='id,snippet',mine=True).execute()
+            items=data.get('items') or []
+            if not items: raise RuntimeError('No authenticated YouTube channel')
+            actual=items[0]['id']
+            print('Authenticated channel:', actual, (items[0].get('snippet') or {}).get('title'))
+            if actual!=expected: raise RuntimeError(f'Wrong YouTube channel {actual}, expected {expected}')
+
+          def verify_existing(youtube, video_id, expected_channel):
+            data=youtube.videos().list(part='id,snippet,status',id=video_id).execute()
+            items=data.get('items') or []
+            if not items: return False
+            item=items[0]
+            if (item.get('snippet') or {}).get('channelId')!=expected_channel: raise RuntimeError('Existing checkpoint is on wrong channel')
+            if (item.get('status') or {}).get('privacyStatus')!='private': raise RuntimeError('Existing checkpoint is not private')
+            return True
+
+          def upload_one(queue_id, locale, channel_id):
+            v=fetch_variant(queue_id,locale)
+            youtube=yt(locale); verify_channel(youtube,channel_id)
+            existing=str(v.get('youtube_video_id') or '')
+            if existing and verify_existing(youtube,existing,channel_id):
+              print('Already uploaded:', existing)
+              return
+            vid=v['id']
+            new_patch('youtube_video_variants',{'id':f'eq.{vid}'},{'status':'uploading','attempts':int(v.get('attempts') or 0)+1,'last_error':None})
+            try:
+              with tempfile.TemporaryDirectory(prefix='leonidanos-upload-') as td:
+                path=Path(td)/'video.mp4'
+                download_chunked(str(v['video_url']),path)
+                body={
+                  'snippet':{'title':str(v['youtube_title'])[:100],'description':str(v['youtube_description'])[:5000],'categoryId':'20'},
+                  'status':{'privacyStatus':'private','selfDeclaredMadeForKids':False}
+                }
+                media=MediaFileUpload(str(path),mimetype='video/mp4',chunksize=8*1024*1024,resumable=True)
+                req=youtube.videos().insert(part='snippet,status',body=body,media_body=media)
+                response=None
+                while response is None:
+                  status,response=req.next_chunk()
+                  if status: print(f'YouTube upload {locale} {queue_id}: {int(status.progress()*100)}%')
+                video_id=str(response['id'])
+                if not verify_existing(youtube,video_id,channel_id): raise RuntimeError('Uploaded video not visible for verification')
+                permalink=f'https://www.youtube.com/watch?v={video_id}'
+                new_patch('youtube_video_variants',{'id':f'eq.{vid}'},{
+                  'status':'uploaded','youtube_video_id':video_id,'youtube_permalink':permalink,
+                  'youtube_privacy_status':'private','last_error':None
+                })
+                if locale=='pt-BR':
+                  try:
+                    new_patch('youtube_queue',{'id':f'eq.{queue_id}'},{'youtube_video_id':video_id,'youtube_permalink':permalink})
+                  except Exception as e:
+                    print('Warning: PT coarse queue checkpoint failed:',e)
+                print('UPLOADED', locale, queue_id, video_id)
+            except Exception as e:
+              try: new_patch('youtube_video_variants',{'id':f'eq.{vid}'},{'status':'failed','last_error':str(e)[:1000]})
+              except Exception: pass
+              raise
+
+          for target in TARGETS:
+            upload_one(*target)
+          print('All four private uploads completed.')
+          PY
+          python /tmp/upload_leonidanos_four.py
