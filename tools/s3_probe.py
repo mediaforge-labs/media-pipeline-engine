@@ -10,8 +10,8 @@ import boto3
 from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
-PROJECT_REF = "rhddgfvtrkmusbvphnlg"
-REGION = "us-west-2"
+PROJECT_REF = "cwxadcrtnbciziexbili"
+REGION = "us-east-1"
 BUCKET = "mediaforge-assets"
 ENDPOINT = f"https://{PROJECT_REF}.storage.supabase.co/storage/v1/s3"
 
