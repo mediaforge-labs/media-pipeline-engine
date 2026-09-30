@@ -1,0 +1,30 @@
+{
+  "channel": "Peter Lofi",
+  "platform": "kick",
+  "profile": "kick-official-1080p60",
+  "video": {
+    "codec": "libx264",
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "rate_control": "CBR",
+    "bitrate_kbps": 8000,
+    "minrate_kbps": 8000,
+    "maxrate_kbps": 8000,
+    "buffer_kbps": 16000,
+    "keyframe_interval_seconds": 2,
+    "gop_frames": 120,
+    "pixel_format": "yuv420p"
+  },
+  "audio": {
+    "codec": "aac",
+    "bitrate_kbps": 160,
+    "sample_rate_hz": 48000,
+    "channels": 2
+  },
+  "transport": {
+    "protocol": "rtmps",
+    "stream_url_env": "KICK_STREAM_URL",
+    "stream_key_env": "KICK_STREAM_KEY"
+  }
+}
